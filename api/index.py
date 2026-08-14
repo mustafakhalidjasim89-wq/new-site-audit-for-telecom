@@ -1,92 +1,123 @@
-import os
 import streamlit as st
-from supabase import create_client, Client
+import os
 
-# Configure page UI
+# Set page parameters
 st.set_page_config(
-    page_title="Telecom Site Audit Portal",
-    page_icon="📡",
+    page_title="Telecom Site Audit AI",
+    page_icon="🛈",
     layout="centered"
 )
 
-# Fetch Supabase Secrets / Environment Variables
-SUPABASE_URL = st.secrets.get("VITE_SUPABASE_URL") or os.getenv("VITE_SUPABASE_URL") or "https://dxtkctltwnghsfljjjym.supabase.co"
-SUPABASE_KEY = st.secrets.get("VITE_SUPABASE_ANON_KEY") or os.getenv("VITE_SUPABASE_ANON_KEY") or ""
-
-if not SUPABASE_KEY:
-    st.error("⚠️ Missing SUPABASE_KEY! Please configure VITE_SUPABASE_ANON_KEY in Streamlit Secrets.")
-    st.stop()
-
-@st.cache_resource
-def init_supabase() -> Client:
-    return create_client(SUPABASE_URL, SUPABASE_KEY)
-
-try:
-    supabase = init_supabase()
-except Exception as e:
-    st.error(f"Error connecting to Supabase: {e}")
-    st.stop()
-
-# Session State Initialization
-if "session" not in st.session_state:
-    st.session_state.session = None
-
-# --- UI: LOGIN SCREEN ---
-if not st.session_state.session:
-    st.title("📡 Telecom Site Audit Portal")
-    st.subheader("Engineer Login")
-
-    with st.form("login_form"):
-        email = st.text_input("Email Address", placeholder="engineer@domain.com")
-        password = st.text_input("Password", type="password", placeholder="••••••••")
-        submit_button = st.form_submit_button("Sign In")
-
-        if submit_button:
-            if not email or not password:
-                st.warning("Please enter both email and password.")
-            else:
-                with st.spinner("Authenticating..."):
-                    try:
-                        res = supabase.auth.sign_in_with_password({"email": email, "password": password})
-                        st.session_state.session = res.session
-                        st.success("Login Successful!")
-                        st.rerun()
-                    except Exception as err:
-                        st.error(f"Authentication Failed: {err}")
-
-# --- UI: DASHBOARD ---
-else:
-    user_email = st.session_state.session.user.email
+# Apply Custom CSS to match the exact dark UI card design
+st.markdown("""
+<style>
+    /* Dark background */
+    .stApp {
+        background-color: #0f172a;
+    }
     
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        st.title("📡 Site Audit Dashboard")
-        st.caption(f"Logged in as: **{user_email}**")
-    with col2:
-        if st.button("Sign Out"):
-            supabase.auth.sign_out()
-            st.session_state.session = None
-            st.rerun()
+    /* Header Container styling */
+    .header-box {
+        background-color: #1e293b;
+        padding: 18px 24px;
+        border-radius: 12px;
+        border: 1px solid #334155;
+        margin-bottom: 20px;
+    }
+    .header-title {
+        color: #06b6d4;
+        font-size: 26px;
+        font-weight: 700;
+        margin: 0;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+    }
+    .header-subtitle {
+        color: #94a3b8;
+        font-size: 13px;
+        margin-top: 4px;
+    }
 
-    st.divider()
+    /* Section Containers */
+    div[data-testid="stForm"] {
+        border: none;
+        padding: 0;
+    }
+    
+    .card-box {
+        background-color: #1e293b;
+        padding: 20px;
+        border-radius: 12px;
+        border: 1px solid #334155;
+        margin-bottom: 20px;
+    }
+    
+    /* Customizing Inputs */
+    .stTextInput > div > div > input {
+        background-color: #0f172a !important;
+        color: #f8fafc !important;
+        border: 1px solid #334155 !important;
+        border-radius: 8px !important;
+    }
 
-    st.subheader("New Site Inspection Report")
-    with st.form("audit_submission"):
-        site_id = st.text_input("Site ID / Name", placeholder="e.g., BGW_0123")
-        tech = st.selectbox("Technology Generation", ["2G", "3G", "4G", "5G", "Multi-band"])
-        power_status = st.selectbox("Power System (-48V DC)", ["Normal", "Battery Warning", "Rectifier Alarm", "Mains Failure"])
-        notes = st.text_area("Audit Notes / Findings")
-        
-        submitted = st.form_submit_button("Submit Audit Record")
-        if submitted:
-            try:
-                # Save into Supabase table
-                supabase.table("audits").insert({
-                    "site_id": site_id,
-                    "technology": tech,
-                    "power_status": power_status,
-                    "notes": notes
-                }).execute()
-                st.success(f"✓ Audit record for {site_id} successfully saved to Supabase!")
-            except Exception as e:
-                st.info(f"Form processed for site {site_id} ({tech}). Note: {e}")
+    /* Button Styling */
+    .stButton > button {
+        width: 100%;
+        background-color: #0284c7;
+        color: white;
+        font-weight: 600;
+        border-radius: 8px;
+        border: none;
+        padding: 12px;
+        font-size: 16px;
+    }
+    .stButton > button:hover {
+        background-color: #0369a1;
+        color: white;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# --- HEADER SECTION ---
+st.markdown("""
+<div class="header-box">
+    <div class="header-title">🛈 Telecom Site Audit AI</div>
+    <div class="header-subtitle">Designed by Mustafa Khalid / Supervisor / R3-BAG-CLS5</div>
+</div>
+""", unsafe_allow_html=True)
+
+# --- INPUT FIELDS SECTION ---
+st.markdown('<div class="card-box">', unsafe_allow_html=True)
+col1, col2 = st.columns(2)
+
+with col1:
+    site_id = st.text_input("SITE ID", placeholder="e.g. IQ-BG-1042")
+
+with col2:
+    tech_name = st.text_input("TECHNICIAN NAME", placeholder="e.g. Alaa Fadel")
+st.markdown('</div>', unsafe_allow_html=True)
+
+# --- PHOTOS SECTION ---
+st.markdown('<div class="card-box">', unsafe_allow_html=True)
+st.write("**PHOTOS (0)**")
+
+tab_cam, tab_gal = st.tabs(["📷 Camera", "📁 Gallery"])
+
+with tab_cam:
+    cam_photo = st.camera_input("Capture photos directly")
+
+with tab_gal:
+    uploaded_files = st.file_uploader("Pick photos from gallery", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
+
+if not cam_photo and not uploaded_files:
+    st.info("No images uploaded. Capture photos or pick from gallery.")
+
+st.markdown('</div>', unsafe_allow_html=True)
+
+# --- ANALYZE SITE BUTTON ---
+if st.button("🔍 Analyze Site"):
+    if not site_id:
+        st.warning("Please enter a SITE ID before analyzing.")
+    else:
+        st.success(f"Processing analysis for Site: {site_id} (Technician: {tech_name or 'N/A'})")
