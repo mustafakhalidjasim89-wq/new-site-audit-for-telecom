@@ -1,48 +1,38 @@
 import xml.etree.ElementTree as ET
-from geo_utils import calculate_distance
 
-def load_kml_sites(kml_file_path: str) -> list:
-    """
-    Parses KML file and returns a list of dictionaries with site names and coordinates.
-    """
-    tree = ET.parse(kml_file_path)
+def parse_telecom_kml(kml_path):
+    tree = ET.parse(kml_path)
     root = tree.getroot()
 
-    # KML namespaces
-    ns = {'kml': 'http://www.opengis.net/kml/2.2'}
+    # XML Namespaces present in MAPS.ME / Custom KML files
+    namespaces = {
+        'kml': 'http://www.opengis.net/kml/2.2',
+        'mwm': 'http://mapswithme.com/kml/ext/1.0'
+    }
+
     sites = []
 
-    for placemark in root.findall('.//kml:Placemark', ns):
-        name_elem = placemark.find('kml:name', ns)
-        coord_elem = placemark.find('.//kml:coordinates', ns)
+    # Iterate over all placemarks in the KML
+    for placemark in root.findall('.//kml:Placemark', namespaces):
+        # 1. Get standard Placemark name
+        name_elem = placemark.find('kml:name', namespaces)
+        name = name_elem.text.strip() if name_elem is not None else ""
 
-        if name_elem is not None and coord_elem is not None:
-            name = name_elem.text.strip()
-            # KML coordinates are formatted as: longitude,latitude,altitude
-            coords_str = coord_elem.text.strip().split(',')
-            lon = float(coords_str[0])
-            lat = float(coords_str[1])
-            
-            sites.append({'name': name, 'lat': lat, 'lon': lon})
+        # 2. Extract custom site code (e.g., BAG6436) from <mwm:customName>
+        custom_name_elem = placemark.find('.//mwm:customName/mwm:lang', namespaces)
+        custom_code = custom_name_elem.text.strip() if custom_name_elem is not None else name
+
+        # 3. Extract coordinates
+        coords_elem = placemark.find('.//kml:coordinates', namespaces)
+        coords = coords_elem.text.strip() if coords_elem is not None else ""
+        
+        lon, lat, *_ = coords.split(',') if coords else (None, None)
+
+        sites.append({
+            'site_code': custom_code,
+            'name': name,
+            'latitude': float(lat) if lat else None,
+            'longitude': float(lon) if lon else None
+        })
 
     return sites
-
-
-def find_nearby_sites(user_lat: float, user_lon: float, sites: list, max_radius_km: float = 5.0) -> list:
-    """
-    Filters and sorts sites based on user's current GPS location.
-    """
-    matched_sites = []
-    
-    for site in sites:
-        dist = calculate_distance(user_lat, user_lon, site['lat'], site['lon'])
-        if dist <= max_radius_km:
-            matched_sites.append({
-                'name': site['name'],
-                'distance_km': round(dist, 2),
-                'distance_m': int(dist * 1000)
-            })
-
-    # Sort nearest sites first
-    matched_sites.sort(key=lambda x: x['distance_km'])
-    return matched_sites
