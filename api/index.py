@@ -1,69 +1,92 @@
 import os
-from flask import Flask, request, jsonify, render_template_string
-from supabase import create_client
+import streamlit as st
+from supabase import create_client, Client
 
-app = Flask(__name__)
+# Configure page UI
+st.set_page_config(
+    page_title="Telecom Site Audit Portal",
+    page_icon="📡",
+    layout="centered"
+)
 
-# Supabase Credentials
-SUPABASE_URL = os.getenv("VITE_SUPABASE_URL") or "https://dxtkctltwnghsfljjjym.supabase.co"
-SUPABASE_KEY = os.getenv("VITE_SUPABASE_ANON_KEY") or "sb_publishable_tCPJmTzylHLZ0rK4O0lMow_7-_7x1MA"
+# Fetch Supabase Secrets / Environment Variables
+SUPABASE_URL = st.secrets.get("VITE_SUPABASE_URL") or os.getenv("VITE_SUPABASE_URL") or "https://dxtkctltwnghsfljjjym.supabase.co"
+SUPABASE_KEY = st.secrets.get("VITE_SUPABASE_ANON_KEY") or os.getenv("VITE_SUPABASE_ANON_KEY") or ""
 
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+if not SUPABASE_KEY:
+    st.error("⚠️ Missing SUPABASE_KEY! Please configure VITE_SUPABASE_ANON_KEY in Streamlit Secrets.")
+    st.stop()
 
-# Simple HTML UI
-HTML_TEMPLATE = """
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Telecom Site Audit Portal</title>
-    <style>
-        body { font-family: sans-serif; background: #0f172a; color: #f8fafc; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; }
-        .card { background: #1e293b; padding: 2rem; border-radius: 8px; width: 320px; border: 1px solid #334155; }
-        h2 { color: #38bdf8; margin-top: 0; }
-        input, select, button { width: 100%; padding: 0.6rem; margin-top: 0.5rem; margin-bottom: 1rem; border-radius: 4px; border: 1px solid #475569; background: #0f172a; color: #fff; box-sizing: border-box; }
-        button { background: #0284c7; font-weight: bold; cursor: pointer; border: none; }
-    </style>
-</head>
-<body>
-    <div class="card">
-        <h2>📡 Site Audit Portal</h2>
-        <form action="/submit" method="POST">
-            <label>Site ID</label>
-            <input type="text" name="site_id" placeholder="e.g. BGW_0123" required>
-            <label>Technology</label>
-            <select name="tech">
-                <option>2G</option>
-                <option>3G</option>
-                <option>4G</option>
-                <option>5G</option>
-            </select>
-            <label>Power System (-48V DC)</label>
-            <select name="power">
-                <option>Normal</option>
-                <option>Battery Warning</option>
-                <option>Mains Failure</option>
-            </select>
-            <button type="submit">Submit Audit</button>
-        </form>
-    </div>
-</body>
-</html>
-"""
+@st.cache_resource
+def init_supabase() -> Client:
+    return create_client(SUPABASE_URL, SUPABASE_KEY)
 
-@app.route('/', defaults={'path': ''})
-@app.route('/<path:path>')
-def home(path):
-    return render_template_string(HTML_TEMPLATE)
+try:
+    supabase = init_supabase()
+except Exception as e:
+    st.error(f"Error connecting to Supabase: {e}")
+    st.stop()
 
-@app.route('/submit', methods=['POST'])
-def submit():
-    site_id = request.form.get('site_id')
-    tech = request.form.get('tech')
-    power = request.form.get('power')
+# Session State Initialization
+if "session" not in st.session_state:
+    st.session_state.session = None
+
+# --- UI: LOGIN SCREEN ---
+if not st.session_state.session:
+    st.title("📡 Telecom Site Audit Portal")
+    st.subheader("Engineer Login")
+
+    with st.form("login_form"):
+        email = st.text_input("Email Address", placeholder="engineer@domain.com")
+        password = st.text_input("Password", type="password", placeholder="••••••••")
+        submit_button = st.form_submit_button("Sign In")
+
+        if submit_button:
+            if not email or not password:
+                st.warning("Please enter both email and password.")
+            else:
+                with st.spinner("Authenticating..."):
+                    try:
+                        res = supabase.auth.sign_in_with_password({"email": email, "password": password})
+                        st.session_state.session = res.session
+                        st.success("Login Successful!")
+                        st.rerun()
+                    except Exception as err:
+                        st.error(f"Authentication Failed: {err}")
+
+# --- UI: DASHBOARD ---
+else:
+    user_email = st.session_state.session.user.email
     
-    # Example insertion into Supabase
-    try:
-        supabase.table('audits').insert({'site_id': site_id, 'tech': tech, 'power_status': power}).execute()
-        return f"<h3>✓ Audit for {site_id} successfully recorded!</h3><a href='/'>Go back</a>"
-    except Exception as e:
-        return f"<h3>Submitted: {site_id} ({tech})</h3><p>Note: {e}</p><a href='/'>Go back</a>"
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        st.title("📡 Site Audit Dashboard")
+        st.caption(f"Logged in as: **{user_email}**")
+    with col2:
+        if st.button("Sign Out"):
+            supabase.auth.sign_out()
+            st.session_state.session = None
+            st.rerun()
+
+    st.divider()
+
+    st.subheader("New Site Inspection Report")
+    with st.form("audit_submission"):
+        site_id = st.text_input("Site ID / Name", placeholder="e.g., BGW_0123")
+        tech = st.selectbox("Technology Generation", ["2G", "3G", "4G", "5G", "Multi-band"])
+        power_status = st.selectbox("Power System (-48V DC)", ["Normal", "Battery Warning", "Rectifier Alarm", "Mains Failure"])
+        notes = st.text_area("Audit Notes / Findings")
+        
+        submitted = st.form_submit_button("Submit Audit Record")
+        if submitted:
+            try:
+                # Save into Supabase table
+                supabase.table("audits").insert({
+                    "site_id": site_id,
+                    "technology": tech,
+                    "power_status": power_status,
+                    "notes": notes
+                }).execute()
+                st.success(f"✓ Audit record for {site_id} successfully saved to Supabase!")
+            except Exception as e:
+                st.info(f"Form processed for site {site_id} ({tech}). Note: {e}")
