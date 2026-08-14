@@ -1,2 +1,2 @@
-streamlit>=1.30.0
+flask>=3.0.0
 supabase>=2.3.0
