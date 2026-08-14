@@ -6,7 +6,7 @@ app = Flask(__name__)
 
 # Supabase Credentials
 SUPABASE_URL = os.getenv("VITE_SUPABASE_URL") or "https://dxtkctltwnghsfljjjym.supabase.co"
-SUPABASE_KEY = os.getenv("VITE_SUPABASE_ANON_KEY") or ""
+SUPABASE_KEY = os.getenv("VITE_SUPABASE_ANON_KEY") or "sb_publishable_tCPJmTzylHLZ0rK4O0lMow_7-_7x1MA"
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
