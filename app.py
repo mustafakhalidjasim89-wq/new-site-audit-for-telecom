@@ -384,7 +384,7 @@ with tab_audit if logged_user == "admin" else st.container():
                         for attempt in range(max_retries):
                             try:
                                 response = client.models.generate_content(
-                                    model='gemini-2.5-flash',
+                                    model='gemini-3.5-flash-lite',
                                     contents=[prompt, *pil_images]
                                 )
                                 report_text = response.text
