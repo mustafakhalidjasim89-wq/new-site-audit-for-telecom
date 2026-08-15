@@ -5,3 +5,4 @@ google-genai
 streamlit-js-eval
 supabase
 resend
+openpyxl
