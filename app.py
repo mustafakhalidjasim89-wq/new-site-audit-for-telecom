@@ -26,7 +26,6 @@ def get_supabase_client() -> Client:
     key = st.secrets.get("SUPABASE_KEY") or os.environ.get("SUPABASE_KEY")
     if not url or not key:
         return None
-    # Standard clean initialization for supabase-py
     return create_client(url, key)
 
 def save_report_to_supabase(site_id, technician, status, report_text, user_lat, user_lon):
@@ -321,10 +320,8 @@ if logged_user == "admin" and tab_reports is not None:
         df_reports = fetch_supabase_reports()
 
         if not df_reports.empty:
-            # Display formatted columns
             st.dataframe(df_reports[['created_at', 'site_id', 'technician', 'coordinates', 'status', 'report_text']], use_container_width=True)
             
-            # Export to CSV feature for admins
             csv_data = df_reports.to_csv(index=False).encode('utf-8')
             st.download_button(
                 label="📥 Download Audit History (CSV)",
