@@ -3,7 +3,7 @@ import os
 import streamlit as st
 import pandas as pd
 from PIL import Image
-import google.generativeai as genai
+from google import genai
 
 # ---------------------------------------------------------
 # 0. Fix Import Paths for Streamlit Cloud Runtime
@@ -165,7 +165,7 @@ if uploaded_files:
             st.image(file, use_container_width=True)
 
 # ---------------------------------------------------------
-# 7. Dynamic AI Vision Inspection Processing
+# 7. AI Vision Inspection Processing (Google GenAI SDK)
 # ---------------------------------------------------------
 st.write("---")
 if st.button("🔍 Analyze Site", use_container_width=True):
@@ -181,43 +181,11 @@ if st.button("🔍 Analyze Site", use_container_width=True):
         else:
             with st.spinner("🤖 Gemini AI Vision is inspecting equipment and analyzing photos..."):
                 try:
-                    # Configure API Key
-                    genai.configure(api_key=gemini_key)
+                    # Initialize Client using the new google-genai SDK
+                    client = genai.Client(api_key=gemini_key)
 
                     # Prepare PIL Image formats
                     pil_images = [Image.open(f).convert("RGB") for f in uploaded_files]
-
-                    # 1. Dynamically retrieve models supported by your key
-                    available_models = [
-                        m.name.replace("models/", "") 
-                        for m in genai.list_models() 
-                        if "generateContent" in m.supported_generation_methods
-                    ]
-
-                    # 2. Hierarchy of preferred vision models
-                    preferred_order = [
-                        "gemini-2.0-flash",
-                        "gemini-2.0-flash-latest",
-                        "gemini-2.0-pro",
-                        "gemini-2.0-pro-latest",
-                        "gemini-pro-vision"
-                    ]
-
-                    # Match active model available on your endpoint
-                    selected_model_name = None
-                    for target in preferred_order:
-                        if target in available_models:
-                            selected_model_name = target
-                            break
-
-                    if not selected_model_name:
-                        if available_models:
-                            selected_model_name = available_models[0]
-                        else:
-                            raise Exception("No active Gemini models found for this API key.")
-
-                    # Initialize model
-                    model = genai.GenerativeModel(selected_model_name)
 
                     prompt = f"""
                     You are an expert telecommunications site audit engineer inspecting field photos.
@@ -231,10 +199,13 @@ if st.button("🔍 Analyze Site", use_container_width=True):
                     4. **Final Verdict**: PASS, PASS WITH CONCERNS, or FAIL (Include justification and required corrective actions).
                     """
 
-                    # Execute Multimodal Call
-                    response = model.generate_content([prompt, *pil_images])
+                    # Execute multimodal request using gemini-2.5-flash
+                    response = client.models.generate_content(
+                        model='gemini-2.5-flash',
+                        contents=[prompt, *pil_images]
+                    )
 
-                    st.success(f"✅ Audit completed using `{selected_model_name}` for Site **{site_id_input}**!")
+                    st.success(f"✅ Audit completed for Site **{site_id_input}**!")
                     st.markdown("### 📋 AI Audit Analysis Report")
                     st.markdown(response.text)
 
