@@ -19,20 +19,15 @@ from kml_parser import parse_telecom_kml
 from geo_utils import find_nearby_sites
 
 # ---------------------------------------------------------
-# Helper: Supabase Client Connection with Header Support
+# Helper: Supabase Client Connection
 # ---------------------------------------------------------
 def get_supabase_client() -> Client:
     url = st.secrets.get("SUPABASE_URL") or os.environ.get("SUPABASE_URL")
     key = st.secrets.get("SUPABASE_KEY") or os.environ.get("SUPABASE_KEY")
     if not url or not key:
         return None
-    
-    # Configure authorization headers for secret/service keys
-    headers = {
-        "apiKey": key,
-        "Authorization": f"Bearer {key}"
-    }
-    return create_client(url, key, options={"headers": headers})
+    # Standard clean initialization for supabase-py
+    return create_client(url, key)
 
 def save_report_to_supabase(site_id, technician, status, report_text, user_lat, user_lon):
     try:
@@ -290,7 +285,7 @@ with tab_audit if logged_user == "admin" else st.container():
                         """
 
                         response = client.models.generate_content(
-                            model='gemini-3.6-flash',
+                            model='gemini-2.5-flash',
                             contents=[prompt, *pil_images]
                         )
 
