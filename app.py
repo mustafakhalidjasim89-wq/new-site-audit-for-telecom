@@ -1,12 +1,17 @@
 import sys
 import os
 import io
-import resend
+import time
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 import streamlit as st
 import pandas as pd
 from PIL import Image
 from math import radians, cos, sin, asin, sqrt
+import resend
 from google import genai
+from google.genai.errors import APIError
 from streamlit_js_eval import get_geolocation
 from supabase import create_client, Client
 
@@ -21,58 +26,78 @@ from kml_parser import parse_telecom_kml
 from geo_utils import find_nearby_sites
 
 # ---------------------------------------------------------
-# Helper: Email Alert Sender via Resend API (HTML Format)
+# Helper: Email Dispatcher via Gmail SMTP (Fallback to Resend)
 # ---------------------------------------------------------
 def send_email_notification(site_id, technician, status, report_text, user_lat, user_lon):
-    resend_key = st.secrets.get("RESEND_API_KEY") or os.environ.get("RESEND_API_KEY")
+    receiver_email = st.secrets.get("ADMIN_RECEIVER_EMAIL") or os.environ.get("ADMIN_RECEIVER_EMAIL") or "mustafa.khalid@asiacell.com"
+    sender_email = st.secrets.get("SENDER_EMAIL") or os.environ.get("SENDER_EMAIL") or "mustafa.khalid@asiacell.com"
+    sender_password = st.secrets.get("SENDER_PASSWORD") or os.environ.get("SENDER_PASSWORD")
     
-    if not resend_key:
-        st.warning("⚠️ Resend API Key missing in Streamlit Secrets. Report saved to database, but email not sent.")
-        return False
+    gmail_server = st.secrets.get("GMAIL_SERVER") or os.environ.get("GMAIL_SERVER") or "smtp.gmail.com"
+    gmail_port = int(st.secrets.get("GMAIL_PORT") or os.environ.get("GMAIL_PORT") or 587)
 
-    try:
-        resend.api_key = resend_key
+    status_color = "#16a34a" if status == "PASS" else ("#ca8a04" if "CONCERNS" in status else "#dc2626")
 
-        sender_email = st.secrets.get("SENDER_EMAIL") or "Telecom Audit <onboarding@resend.dev>"
-        receiver_email = "mustafa.khalid@asiacell.com"
+    html_body = f"""
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 8px;">
+        <h2 style="color: #0284c7; margin-bottom: 5px;">📡 Telecom Site Audit Report</h2>
+        <hr style="border: 0; border-top: 1px solid #eee;">
+        
+        <table style="width: 100%; margin-top: 15px; font-size: 14px;">
+            <tr><td><strong>Site ID:</strong></td><td>{site_id}</td></tr>
+            <tr><td><strong>Technician:</strong></td><td>{technician}</td></tr>
+            <tr><td><strong>Coordinates:</strong></td><td>{user_lat}, {user_lon}</td></tr>
+            <tr><td><strong>Audit Status:</strong></td><td><span style="background-color: {status_color}; color: white; padding: 4px 8px; border-radius: 4px; font-weight: bold;">{status}</span></td></tr>
+        </table>
 
-        status_color = "#16a34a" if status == "PASS" else ("#ca8a04" if "CONCERNS" in status else "#dc2626")
+        <hr style="border: 0; border-top: 1px solid #eee; margin: 20px 0;">
 
-        html_body = f"""
-        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 8px;">
-            <h2 style="color: #0284c7; margin-bottom: 5px;">📡 Telecom Site Audit Report</h2>
-            <hr style="border: 0; border-top: 1px solid #eee;">
-            
-            <table style="width: 100%; margin-top: 15px; font-size: 14px;">
-                <tr><td><strong>Site ID:</strong></td><td>{site_id}</td></tr>
-                <tr><td><strong>Technician:</strong></td><td>{technician}</td></tr>
-                <tr><td><strong>Coordinates:</strong></td><td>{user_lat}, {user_lon}</td></tr>
-                <tr><td><strong>Audit Status:</strong></td><td><span style="background-color: {status_color}; color: white; padding: 4px 8px; border-radius: 4px; font-weight: bold;">{status}</span></td></tr>
-            </table>
-
-            <hr style="border: 0; border-top: 1px solid #eee; margin: 20px 0;">
-
-            <h3 style="color: #333;">🤖 AI Inspection Findings</h3>
-            <div style="background-color: #f8fafc; padding: 15px; border-left: 4px solid #0284c7; border-radius: 4px; white-space: pre-wrap; font-size: 13px; line-height: 1.6;">
+        <h3 style="color: #333;">🤖 AI Inspection Findings</h3>
+        <div style="background-color: #f8fafc; padding: 15px; border-left: 4px solid #0284c7; border-radius: 4px; white-space: pre-wrap; font-size: 13px; line-height: 1.6;">
 {report_text}
-            </div>
-
-            <p style="font-size: 11px; color: #94a3b8; margin-top: 25px; text-align: center;">
-                Automated Audit Notification • Asiacell R3-BAG-CLS5
-            </p>
         </div>
-        """
 
-        resend.Emails.send({
-            "from": sender_email,
-            "to": receiver_email,
-            "subject": f"🚨 Site Audit Report: {site_id} [{status}]",
-            "html": html_body
-        })
-        return True
-    except Exception as e:
-        st.warning(f"⚠️ Report saved, but email dispatch failed: {str(e)}")
-        return False
+        <p style="font-size: 11px; color: #94a3b8; margin-top: 25px; text-align: center;">
+            Automated Audit Notification • Asiacell R3-BAG-CLS5
+        </p>
+    </div>
+    """
+
+    # Primary Method: Gmail SMTP Dispatch
+    if sender_password and sender_password != "your-actual-asiacell-password":
+        try:
+            msg = MIMEMultipart("alternative")
+            msg["Subject"] = f"🚨 Site Audit Report: {site_id} [{status}]"
+            msg["From"] = sender_email
+            msg["To"] = receiver_email
+            msg.attach(MIMEText(html_body, "html"))
+
+            server = smtplib.SMTP(gmail_server, gmail_port)
+            server.starttls()
+            server.login(sender_email, sender_password)
+            server.sendmail(sender_email, receiver_email, msg.as_string())
+            server.quit()
+            return True
+        except Exception as e:
+            st.warning(f"⚠️ Gmail SMTP dispatch failed ({str(e)}). Attempting Resend API...")
+
+    # Secondary Method: Resend API
+    resend_key = st.secrets.get("RESEND_API_KEY") or os.environ.get("RESEND_API_KEY")
+    if resend_key:
+        try:
+            resend.api_key = resend_key
+            resend.Emails.send({
+                "from": "Telecom Audit <onboarding@resend.dev>",
+                "to": receiver_email,
+                "subject": f"🚨 Site Audit Report: {site_id} [{status}]",
+                "html": html_body
+            })
+            return True
+        except Exception as e:
+            st.warning(f"⚠️ Resend dispatch failed: {str(e)}")
+
+    st.warning("⚠️ Email notification skipped: Configure Gmail App Password or Resend API key.")
+    return False
 
 # ---------------------------------------------------------
 # Helper: Supabase Client Connection
@@ -100,12 +125,11 @@ def save_report_to_supabase(site_id, technician, status, report_text, user_lat, 
         }
         supabase.table("audit_reports").insert(data).execute()
         
-        # Dispatch email notification via Resend
+        # Trigger email notification
         send_email_notification(site_id, technician, status, report_text, user_lat, user_lon)
-        
         return True
     except Exception as e:
-        st.error(f"⚠️ Submission failed: {str(e)}")
+        st.error(f"⚠️ Database submission failed: {str(e)}")
         return False
 
 def fetch_supabase_reports():
@@ -300,7 +324,7 @@ with tab_audit if logged_user == "admin" else st.container():
                 else:
                     st.warning("⚠️ GPS Signal Required: Please enable device location permissions.")
 
-    # Compact Photo Upload Section
+    # Photo Upload Section
     st.markdown("### PHOTOS")
     uploaded_files = []
 
@@ -320,13 +344,12 @@ with tab_audit if logged_user == "admin" else st.container():
 
         if uploaded_files:
             st.write(f"Selected Photos ({len(uploaded_files)}):")
-            # Compact thumbnail previews (fixed width)
             cols = st.columns(6)
             for idx, file in enumerate(uploaded_files):
                 with cols[idx % 6]:
                     st.image(file, width=120)
 
-    # Direct Submission Action
+    # Submission Action with Gemini 429 Retry Backoff
     st.write("---")
     if st.button("📤 Submit Site Audit to Supervisor", use_container_width=True, disabled=not is_location_valid):
         if not uploaded_files:
@@ -337,7 +360,7 @@ with tab_audit if logged_user == "admin" else st.container():
             if not gemini_key:
                 st.error("❌ Missing Gemini API Key! Configure `GEMINI_API_KEY` in Streamlit Secrets.")
             else:
-                with st.spinner("🤖 Processing audit and submitting directly to supervisor..."):
+                with st.spinner("🤖 Processing audit with AI and submitting directly..."):
                     try:
                         client = genai.Client(api_key=gemini_key)
                         pil_images = [Image.open(f).convert("RGB") for f in uploaded_files]
@@ -354,23 +377,45 @@ with tab_audit if logged_user == "admin" else st.container():
                         4. **Final Verdict**: PASS, PASS WITH CONCERNS, or FAIL (Include justification and required corrective actions).
                         """
 
-                        response = client.models.generate_content(
-                            model='gemini-3.6-flash',
-                            contents=[prompt, *pil_images]
-                        )
+                        # Exponential retry mechanism for 429 rate limits
+                        max_retries = 3
+                        report_text = None
 
-                        report_text = response.text
+                        for attempt in range(max_retries):
+                            try:
+                                response = client.models.generate_content(
+                                    model='gemini-3.6-flash',
+                                    contents=[prompt, *pil_images]
+                                )
+                                report_text = response.text
+                                break
+                            except APIError as api_err:
+                                if "429" in str(api_err) or "RESOURCE_EXHAUSTED" in str(api_err):
+                                    if attempt < max_retries - 1:
+                                        wait_sec = 15 * (attempt + 1)
+                                        st.warning(f"⏳ Rate limit reached. Retrying in {wait_sec} seconds (Attempt {attempt + 1}/{max_retries})...")
+                                        time.sleep(wait_sec)
+                                    else:
+                                        raise api_err
+                                else:
+                                    raise api_err
 
-                        status_verdict = "PASS"
-                        if "FAIL" in report_text.upper():
-                            status_verdict = "FAIL"
-                        elif "CONCERNS" in report_text.upper():
-                            status_verdict = "PASS WITH CONCERNS"
+                        if report_text:
+                            status_verdict = "PASS"
+                            if "FAIL" in report_text.upper():
+                                status_verdict = "FAIL"
+                            elif "CONCERNS" in report_text.upper():
+                                status_verdict = "PASS WITH CONCERNS"
 
-                        # Save to Supabase and trigger Resend email directly to supervisor
-                        if save_report_to_supabase(selected_site_code, tech_name_input or 'Unassigned', status_verdict, report_text, user_lat, user_lon):
-                            st.success(f"✅ Audit report for Site **{selected_site_code}** successfully submitted to supervisor!")
+                            # Save to Supabase and dispatch email
+                            if save_report_to_supabase(selected_site_code, tech_name_input or 'Unassigned', status_verdict, report_text, user_lat, user_lon):
+                                st.success(f"✅ Audit report for Site **{selected_site_code}** successfully submitted to supervisor!")
 
+                    except APIError as e:
+                        if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+                            st.error("⏳ **API Quota Exceeded**: You've reached the Gemini Free Tier daily limit (20 requests/day). Switch to pay-as-you-go in Google AI Studio or try again later.")
+                        else:
+                            st.error(f"⚠️ Gemini API Error: {str(e)}")
                     except Exception as e:
                         st.error(f"⚠️ Audit submission failed: {str(e)}")
 
