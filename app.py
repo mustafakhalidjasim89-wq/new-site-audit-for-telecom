@@ -1,5 +1,6 @@
 import sys
 import os
+import io
 import resend
 import streamlit as st
 import pandas as pd
@@ -20,7 +21,7 @@ from kml_parser import parse_telecom_kml
 from geo_utils import find_nearby_sites
 
 # ---------------------------------------------------------
-# Helper: Email Alert Sender via Resend API
+# Helper: Email Alert Sender via Resend API (HTML Format)
 # ---------------------------------------------------------
 def send_email_notification(site_id, technician, status, report_text, user_lat, user_lon):
     resend_key = st.secrets.get("RESEND_API_KEY") or os.environ.get("RESEND_API_KEY")
@@ -32,30 +33,41 @@ def send_email_notification(site_id, technician, status, report_text, user_lat, 
     try:
         resend.api_key = resend_key
 
-        # Fallback to onboarding@resend.dev if custom domain is not set/verified
         sender_email = st.secrets.get("SENDER_EMAIL") or "Telecom Audit <onboarding@resend.dev>"
         receiver_email = "mustafa.khalid@asiacell.com"
 
-        body = f"""
-        New Telecom Site Audit Submitted!
+        status_color = "#16a34a" if status == "PASS" else ("#ca8a04" if "CONCERNS" in status else "#dc2626")
 
-        ====================================================
-        Site Code   : {site_id}
-        Technician  : {technician}
-        Status      : {status}
-        Coordinates : {user_lat}, {user_lon}
-        ====================================================
+        html_body = f"""
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 8px;">
+            <h2 style="color: #0284c7; margin-bottom: 5px;">📡 Telecom Site Audit Report</h2>
+            <hr style="border: 0; border-top: 1px solid #eee;">
+            
+            <table style="width: 100%; margin-top: 15px; font-size: 14px;">
+                <tr><td><strong>Site ID:</strong></td><td>{site_id}</td></tr>
+                <tr><td><strong>Technician:</strong></td><td>{technician}</td></tr>
+                <tr><td><strong>Coordinates:</strong></td><td>{user_lat}, {user_lon}</td></tr>
+                <tr><td><strong>Audit Status:</strong></td><td><span style="background-color: {status_color}; color: white; padding: 4px 8px; border-radius: 4px; font-weight: bold;">{status}</span></td></tr>
+            </table>
 
-        AI Inspection Analysis & Findings:
-        
-        {report_text}
+            <hr style="border: 0; border-top: 1px solid #eee; margin: 20px 0;">
+
+            <h3 style="color: #333;">🤖 AI Inspection Findings</h3>
+            <div style="background-color: #f8fafc; padding: 15px; border-left: 4px solid #0284c7; border-radius: 4px; white-space: pre-wrap; font-size: 13px; line-height: 1.6;">
+{report_text}
+            </div>
+
+            <p style="font-size: 11px; color: #94a3b8; margin-top: 25px; text-align: center;">
+                Automated Audit Notification • Asiacell R3-BAG-CLS5
+            </p>
+        </div>
         """
 
         resend.Emails.send({
             "from": sender_email,
             "to": receiver_email,
-            "subject": f"🚨 New Site Audit Report: {site_id} [{status}]",
-            "text": body
+            "subject": f"🚨 Site Audit Report: {site_id} [{status}]",
+            "html": html_body
         })
         return True
     except Exception as e:
@@ -106,6 +118,16 @@ def fetch_supabase_reports():
     except Exception as e:
         st.error(f"⚠️ Failed to fetch remote reports: {str(e)}")
         return pd.DataFrame()
+
+# ---------------------------------------------------------
+# Helper: Convert DataFrame to Excel Binary Buffer
+# ---------------------------------------------------------
+def convert_df_to_excel(df):
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='Audit_Reports')
+    output.seek(0)
+    return output.getvalue()
 
 # ---------------------------------------------------------
 # Helper: Haversine Distance Formula (km)
@@ -367,12 +389,14 @@ if logged_user == "admin" and tab_reports is not None:
         if not df_reports.empty:
             st.dataframe(df_reports[['created_at', 'site_id', 'technician', 'coordinates', 'status', 'report_text']], use_container_width=True)
             
-            csv_data = df_reports.to_csv(index=False).encode('utf-8')
+            # Excel Download Button
+            excel_data = convert_df_to_excel(df_reports[['created_at', 'site_id', 'technician', 'coordinates', 'status', 'report_text']])
+            
             st.download_button(
-                label="📥 Download Audit History (CSV)",
-                data=csv_data,
-                file_name="site_audit_reports.csv",
-                mime="text/csv"
+                label="📊 Download Audit History (Excel .xlsx)",
+                data=excel_data,
+                file_name="site_audit_reports.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
         else:
             st.info("No remote records found in the database yet.")
