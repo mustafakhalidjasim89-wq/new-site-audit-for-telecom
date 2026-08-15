@@ -32,6 +32,10 @@ def send_email_notification(site_id, technician, status, report_text, user_lat, 
     try:
         resend.api_key = resend_key
 
+        # Fallback to onboarding@resend.dev if custom domain is not set/verified
+        sender_email = st.secrets.get("SENDER_EMAIL") or "Telecom Audit <onboarding@resend.dev>"
+        receiver_email = "mustafa.khalid@asiacell.com"
+
         body = f"""
         New Telecom Site Audit Submitted!
 
@@ -48,8 +52,8 @@ def send_email_notification(site_id, technician, status, report_text, user_lat, 
         """
 
         resend.Emails.send({
-            "from": "Telecom Audit <onboarding@resend.dev>",
-            "to": "mustafa.khalid@asiacell.com",
+            "from": sender_email,
+            "to": receiver_email,
             "subject": f"🚨 New Site Audit Report: {site_id} [{status}]",
             "text": body
         })
@@ -294,7 +298,7 @@ with tab_audit if logged_user == "admin" else st.container():
 
         if uploaded_files:
             st.write(f"Selected Photos ({len(uploaded_files)}):")
-            # Compact thumbnail previews
+            # Compact thumbnail previews (fixed width)
             cols = st.columns(6)
             for idx, file in enumerate(uploaded_files):
                 with cols[idx % 6]:
@@ -341,7 +345,7 @@ with tab_audit if logged_user == "admin" else st.container():
                         elif "CONCERNS" in report_text.upper():
                             status_verdict = "PASS WITH CONCERNS"
 
-                        # Save to database and trigger Resend email
+                        # Save to Supabase and trigger Resend email directly to supervisor
                         if save_report_to_supabase(selected_site_code, tech_name_input or 'Unassigned', status_verdict, report_text, user_lat, user_lon):
                             st.success(f"✅ Audit report for Site **{selected_site_code}** successfully submitted to supervisor!")
 
