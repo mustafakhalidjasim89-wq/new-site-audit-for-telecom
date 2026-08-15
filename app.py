@@ -1,8 +1,6 @@
 import sys
 import os
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
+import resend
 import streamlit as st
 import pandas as pd
 from PIL import Image
@@ -22,25 +20,17 @@ from kml_parser import parse_telecom_kml
 from geo_utils import find_nearby_sites
 
 # ---------------------------------------------------------
-# Helper: Email Alert Sender (Exchange / Office 365)
+# Helper: Email Alert Sender via Resend API
 # ---------------------------------------------------------
 def send_email_notification(site_id, technician, status, report_text, user_lat, user_lon):
-    sender_email = st.secrets.get("SENDER_EMAIL") or os.environ.get("SENDER_EMAIL")
-    sender_password = st.secrets.get("SENDER_PASSWORD") or os.environ.get("SENDER_PASSWORD")
-    receiver_email = "mustafa.khalid@asiacell.com"
+    resend_key = st.secrets.get("RESEND_API_KEY") or os.environ.get("RESEND_API_KEY")
     
-    smtp_server = st.secrets.get("EXCHANGE_SERVER", "smtp.office365.com")
-    smtp_port = int(st.secrets.get("EXCHANGE_PORT", 587))
-
-    if not sender_email or not sender_password:
-        st.warning("⚠️ Email secrets missing. Report saved to database, but email not sent.")
+    if not resend_key:
+        st.warning("⚠️ Resend API Key missing in Streamlit Secrets. Report saved to database, but email not sent.")
         return False
 
     try:
-        msg = MIMEMultipart()
-        msg['From'] = sender_email
-        msg['To'] = receiver_email
-        msg['Subject'] = f"🚨 New Site Audit Report: {site_id} [{status}]"
+        resend.api_key = resend_key
 
         body = f"""
         New Telecom Site Audit Submitted!
@@ -56,19 +46,16 @@ def send_email_notification(site_id, technician, status, report_text, user_lat, 
         
         {report_text}
         """
-        msg.attach(MIMEText(body, 'plain'))
 
-        # Connect to Exchange / Office 365 SMTP Server
-        server = smtplib.SMTP(smtp_server, smtp_port)
-        server.ehlo()
-        server.starttls()
-        server.ehlo()
-        server.login(sender_email, sender_password)
-        server.send_message(msg)
-        server.quit()
+        resend.Emails.send({
+            "from": "Telecom Audit <onboarding@resend.dev>",
+            "to": "mustafa.khalid@asiacell.com",
+            "subject": f"🚨 New Site Audit Report: {site_id} [{status}]",
+            "text": body
+        })
         return True
     except Exception as e:
-        st.warning(f"⚠️ Report saved, but Exchange email failed: {str(e)}")
+        st.warning(f"⚠️ Report saved, but email dispatch failed: {str(e)}")
         return False
 
 # ---------------------------------------------------------
@@ -97,7 +84,7 @@ def save_report_to_supabase(site_id, technician, status, report_text, user_lat, 
         }
         supabase.table("audit_reports").insert(data).execute()
         
-        # Trigger Exchange Email directly to mustafa.khalid@asiacell.com
+        # Dispatch email notification via Resend
         send_email_notification(site_id, technician, status, report_text, user_lat, user_lon)
         
         return True
@@ -307,7 +294,7 @@ with tab_audit if logged_user == "admin" else st.container():
 
         if uploaded_files:
             st.write(f"Selected Photos ({len(uploaded_files)}):")
-            # Compact thumbnail preview without container stretching
+            # Compact thumbnail previews
             cols = st.columns(6)
             for idx, file in enumerate(uploaded_files):
                 with cols[idx % 6]:
@@ -354,7 +341,7 @@ with tab_audit if logged_user == "admin" else st.container():
                         elif "CONCERNS" in report_text.upper():
                             status_verdict = "PASS WITH CONCERNS"
 
-                        # Save to database and trigger Exchange email directly to supervisor
+                        # Save to database and trigger Resend email
                         if save_report_to_supabase(selected_site_code, tech_name_input or 'Unassigned', status_verdict, report_text, user_lat, user_lon):
                             st.success(f"✅ Audit report for Site **{selected_site_code}** successfully submitted to supervisor!")
 
