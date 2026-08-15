@@ -45,7 +45,7 @@ def save_report_to_supabase(site_id, technician, status, report_text, user_lat, 
         supabase.table("audit_reports").insert(data).execute()
         return True
     except Exception as e:
-        st.error(f"⚠️ Remote sync failed: {str(e)}")
+        st.error(f"⚠️ Submission failed: {str(e)}")
         return False
 
 def fetch_supabase_reports():
@@ -235,7 +235,7 @@ with tab_audit if logged_user == "admin" else st.container():
     uploaded_files = []
 
     if not is_location_valid:
-        st.error("🔒 Photo upload and analysis are locked. Please select a site and confirm you are within 3 km of the location.")
+        st.error("🔒 Photo upload and submission are locked. Select a site and confirm you are within 3 km.")
     else:
         input_mode = st.radio("Choose Input Method:", ["Camera", "Gallery"], horizontal=True)
 
@@ -255,9 +255,9 @@ with tab_audit if logged_user == "admin" else st.container():
                 with cols[idx % 4]:
                     st.image(file, use_container_width=True)
 
-    # AI Vision Analysis & Remote Sync Execution
+    # Direct Submission (Hides Report from Technician)
     st.write("---")
-    if st.button("🔍 Analyze Site", use_container_width=True, disabled=not is_location_valid):
+    if st.button("📤 Submit Site Audit to Supervisor", use_container_width=True, disabled=not is_location_valid):
         if not uploaded_files:
             st.warning("Please capture or upload at least one site photo.")
         else:
@@ -266,7 +266,7 @@ with tab_audit if logged_user == "admin" else st.container():
             if not gemini_key:
                 st.error("❌ Missing Gemini API Key! Configure `GEMINI_API_KEY` in Streamlit Secrets.")
             else:
-                with st.spinner("🤖 AI Vision analyzing site and uploading report to database..."):
+                with st.spinner("🤖 Processing audit and submitting directly to supervisor..."):
                     try:
                         client = genai.Client(api_key=gemini_key)
                         pil_images = [Image.open(f).convert("RGB") for f in uploaded_files]
@@ -289,23 +289,24 @@ with tab_audit if logged_user == "admin" else st.container():
                         )
 
                         report_text = response.text
-                        st.success(f"✅ Audit completed for Site **{selected_site_code}**!")
-                        st.markdown("### 📋 AI Audit Analysis Report")
-                        st.markdown(report_text)
 
-                        # Parse status verdict
                         status_verdict = "PASS"
                         if "FAIL" in report_text.upper():
                             status_verdict = "FAIL"
                         elif "CONCERNS" in report_text.upper():
                             status_verdict = "PASS WITH CONCERNS"
 
-                        # Push data to Supabase
+                        # Save report to database without showing report details to technician
                         if save_report_to_supabase(selected_site_code, tech_name_input or 'Unassigned', status_verdict, report_text, user_lat, user_lon):
-                            st.info("☁️ Report saved remotely to Supabase database for admin review!")
+                            st.success(f"✅ Audit report for Site **{selected_site_code}** successfully submitted to supervisor!")
+                            
+                            # Only display report content if admin is logged in
+                            if logged_user == "admin":
+                                st.markdown("### 📋 AI Audit Analysis (Admin View Only)")
+                                st.markdown(report_text)
 
                     except Exception as e:
-                        st.error(f"⚠️ AI Vision Analysis failed: {str(e)}")
+                        st.error(f"⚠️ Audit processing failed: {str(e)}")
 
 # ---------------------------------------------------------
 # TAB 2: Admin Remote Dashboard
