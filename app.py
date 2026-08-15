@@ -24,7 +24,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# Dark glassmorphism theme matching your custom layout
+# Dark glassmorphism theme
 st.markdown("""
     <style>
     .stApp {
@@ -165,7 +165,7 @@ if uploaded_files:
             st.image(file, use_container_width=True)
 
 # ---------------------------------------------------------
-# 7. Dynamic AI Vision Inspection Processing
+# 7. AI Vision Inspection Processing (Google GenAI SDK)
 # ---------------------------------------------------------
 st.write("---")
 if st.button("🔍 Analyze Site", use_container_width=True):
@@ -181,43 +181,11 @@ if st.button("🔍 Analyze Site", use_container_width=True):
         else:
             with st.spinner("🤖 Gemini AI Vision is inspecting equipment and analyzing photos..."):
                 try:
-                    # Initialize client with modern google-genai SDK
+                    # Initialize Google GenAI Client
                     client = genai.Client(api_key=gemini_key)
 
-                    # Prepare PIL Image objects
+                    # Prepare PIL Image instances
                     pil_images = [Image.open(f).convert("RGB") for f in uploaded_files]
-
-                    # 1. Fetch available models from API key dynamically
-                    available_models = []
-                    for m in client.models.list():
-                        # Extract clean model name without 'models/' prefix
-                        m_name = m.name.split("/")[-1] if "/" in m.name else m.name
-                        if hasattr(m, 'supported_actions') and m.supported_actions:
-                            if 'generateContent' in m.supported_actions:
-                                available_models.append(m_name)
-                        else:
-                            available_models.append(m_name)
-
-                    # 2. Match against active preferred vision models
-                    preferred_order = [
-                        "gemini-2.5-flash",
-                        "gemini-2.0-flash",
-                        "gemini-1.5-flash",
-                        "gemini-1.5-pro"
-                    ]
-
-                    selected_model = None
-                    for target in preferred_order:
-                        if target in available_models:
-                            selected_model = target
-                            break
-
-                    # Fallback to first available model if preferred ones are absent
-                    if not selected_model:
-                        if available_models:
-                            selected_model = available_models[0]
-                        else:
-                            selected_model = "gemini-2.5-flash"
 
                     prompt = f"""
                     You are an expert telecommunications site audit engineer inspecting field photos.
@@ -231,13 +199,13 @@ if st.button("🔍 Analyze Site", use_container_width=True):
                     4. **Final Verdict**: PASS, PASS WITH CONCERNS, or FAIL (Include justification and required corrective actions).
                     """
 
-                    # Execute vision request
+                    # Call generation endpoint using supported model string
                     response = client.models.generate_content(
-                        model=selected_model,
+                        model='gemini-2.5-flash',
                         contents=[prompt, *pil_images]
                     )
 
-                    st.success(f"✅ Audit completed using model `{selected_model}` for Site **{site_id_input}**!")
+                    st.success(f"✅ Audit completed for Site **{site_id_input}**!")
                     st.markdown("### 📋 AI Audit Analysis Report")
                     st.markdown(response.text)
 
