@@ -19,14 +19,20 @@ from kml_parser import parse_telecom_kml
 from geo_utils import find_nearby_sites
 
 # ---------------------------------------------------------
-# Helper: Supabase Client Connection
+# Helper: Supabase Client Connection with Header Support
 # ---------------------------------------------------------
 def get_supabase_client() -> Client:
     url = st.secrets.get("SUPABASE_URL") or os.environ.get("SUPABASE_URL")
     key = st.secrets.get("SUPABASE_KEY") or os.environ.get("SUPABASE_KEY")
     if not url or not key:
         return None
-    return create_client(url, key)
+    
+    # Configure authorization headers for secret/service keys
+    headers = {
+        "apiKey": key,
+        "Authorization": f"Bearer {key}"
+    }
+    return create_client(url, key, options={"headers": headers})
 
 def save_report_to_supabase(site_id, technician, status, report_text, user_lat, user_lon):
     try:
@@ -74,7 +80,7 @@ def calculate_distance_km(lat1, lon1, lat2, lon2):
         return float('inf')
 
 # ---------------------------------------------------------
-# 1. Page Config & Custom UI Styling
+# 1. Page Config & Custom Dark UI Styling
 # ---------------------------------------------------------
 st.set_page_config(
     page_title="Telecom Site Audit AI",
@@ -163,7 +169,7 @@ raw_sites = load_kml_dataset(KML_PATH)
 df_sites = pd.DataFrame(raw_sites)
 
 # ---------------------------------------------------------
-# 4. Header & Navigation
+# 4. Header & Navigation Tabs
 # ---------------------------------------------------------
 st.markdown("""
     <div class='header-card'>
@@ -194,7 +200,7 @@ with tab_audit if logged_user == "admin" else st.container():
     with col_tech:
         tech_name_input = st.text_input("TECHNICIAN NAME", placeholder="e.g. Alaa Fadel").strip()
 
-    # Get GPS Location
+    # Fetch GPS Location
     loc = get_geolocation()
     user_lat, user_lon = None, None
 
@@ -230,7 +236,7 @@ with tab_audit if logged_user == "admin" else st.container():
                 else:
                     st.warning("⚠️ GPS Signal Required: Please enable device location permissions.")
 
-    # Photo Upload Section
+    # Photo Capture & Upload Section
     st.markdown("### PHOTOS")
     uploaded_files = []
 
@@ -255,7 +261,7 @@ with tab_audit if logged_user == "admin" else st.container():
                 with cols[idx % 4]:
                     st.image(file, use_container_width=True)
 
-    # Execution & Supabase Sync
+    # AI Vision Analysis & Remote Sync Execution
     st.write("---")
     if st.button("🔍 Analyze Site", use_container_width=True, disabled=not is_location_valid):
         if not uploaded_files:
@@ -293,14 +299,14 @@ with tab_audit if logged_user == "admin" else st.container():
                         st.markdown("### 📋 AI Audit Analysis Report")
                         st.markdown(report_text)
 
-                        # Determine status from response
+                        # Parse status verdict
                         status_verdict = "PASS"
                         if "FAIL" in report_text.upper():
                             status_verdict = "FAIL"
                         elif "CONCERNS" in report_text.upper():
                             status_verdict = "PASS WITH CONCERNS"
 
-                        # Sync to Supabase
+                        # Push data to Supabase
                         if save_report_to_supabase(selected_site_code, tech_name_input or 'Unassigned', status_verdict, report_text, user_lat, user_lon):
                             st.info("☁️ Report saved remotely to Supabase database for admin review!")
 
@@ -320,9 +326,10 @@ if logged_user == "admin" and tab_reports is not None:
         df_reports = fetch_supabase_reports()
 
         if not df_reports.empty:
+            # Display formatted columns
             st.dataframe(df_reports[['created_at', 'site_id', 'technician', 'coordinates', 'status', 'report_text']], use_container_width=True)
             
-            # Export option for Admin
+            # Export to CSV feature for admins
             csv_data = df_reports.to_csv(index=False).encode('utf-8')
             st.download_button(
                 label="📥 Download Audit History (CSV)",
