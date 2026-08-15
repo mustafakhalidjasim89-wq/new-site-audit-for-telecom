@@ -3,7 +3,14 @@ import os
 import streamlit as st
 import pandas as pd
 from PIL import Image
-from google import genai
+
+# Check for new vs legacy SDK
+try:
+    from google import genai
+    NEW_SDK = True
+except ImportError:
+    import google.generativeai as genai_legacy
+    NEW_SDK = False
 
 # ---------------------------------------------------------
 # 0. Fix Import Paths for Streamlit Cloud Runtime
@@ -165,7 +172,7 @@ if uploaded_files:
             st.image(file, use_container_width=True)
 
 # ---------------------------------------------------------
-# 7. AI Vision Inspection Processing (Google GenAI SDK)
+# 7. AI Vision Inspection Processing (Multi-Model Resilient)
 # ---------------------------------------------------------
 st.write("---")
 if st.button("🔍 Analyze Site", use_container_width=True):
@@ -181,10 +188,6 @@ if st.button("🔍 Analyze Site", use_container_width=True):
         else:
             with st.spinner("🤖 Gemini AI Vision is inspecting equipment and analyzing photos..."):
                 try:
-                    # Initialize Client using the new google-genai SDK
-                    client = genai.Client(api_key=gemini_key)
-
-                    # Prepare PIL Image formats
                     pil_images = [Image.open(f).convert("RGB") for f in uploaded_files]
 
                     prompt = f"""
@@ -199,15 +202,50 @@ if st.button("🔍 Analyze Site", use_container_width=True):
                     4. **Final Verdict**: PASS, PASS WITH CONCERNS, or FAIL (Include justification and required corrective actions).
                     """
 
-                    # Execute multimodal request using gemini-2.5-flash
-                    response = client.models.generate_content(
-                        model='gemini-2.5-flash',
-                        contents=[prompt, *pil_images]
-                    )
+                    # Order of models to try
+                    candidate_models = [
+                        "gemini-2.5-flash",
+                        "gemini-2.0-flash",
+                        "gemini-1.5-flash"
+                    ]
 
-                    st.success(f"✅ Audit completed for Site **{site_id_input}**!")
-                    st.markdown("### 📋 AI Audit Analysis Report")
-                    st.markdown(response.text)
+                    response_text = None
+                    used_model = None
+                    last_error = None
+
+                    if NEW_SDK:
+                        client = genai.Client(api_key=gemini_key)
+                        for model_name in candidate_models:
+                            try:
+                                res = client.models.generate_content(
+                                    model=model_name,
+                                    contents=[prompt, *pil_images]
+                                )
+                                response_text = res.text
+                                used_model = model_name
+                                break
+                            except Exception as e:
+                                last_error = e
+                                continue
+                    else:
+                        genai_legacy.configure(api_key=gemini_key)
+                        for model_name in candidate_models:
+                            try:
+                                model = genai_legacy.GenerativeModel(model_name)
+                                res = model.generate_content([prompt, *pil_images])
+                                response_text = res.text
+                                used_model = model_name
+                                break
+                            except Exception as e:
+                                last_error = e
+                                continue
+
+                    if response_text:
+                        st.success(f"✅ Audit completed for Site **{site_id_input}** (Engine: `{used_model}`)!")
+                        st.markdown("### 📋 AI Audit Analysis Report")
+                        st.markdown(response_text)
+                    else:
+                        raise last_error or Exception("Unable to connect to any Gemini Vision endpoint.")
 
                 except Exception as e:
                     st.error(f"⚠️ AI Vision Analysis failed: {str(e)}")
