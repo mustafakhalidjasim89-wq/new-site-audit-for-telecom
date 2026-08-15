@@ -16,7 +16,7 @@ from kml_parser import parse_telecom_kml
 from geo_utils import find_nearby_sites
 
 # ---------------------------------------------------------
-# 1. Page Configuration & Custom UI Styling
+# 1. Page Configuration & Custom Dark UI Styling
 # ---------------------------------------------------------
 st.set_page_config(
     page_title="Telecom Site Audit AI",
@@ -24,7 +24,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# Dark glassmorphism theme matching your interface layout
+# Dark glassmorphism theme matching your custom layout
 st.markdown("""
     <style>
     .stApp {
@@ -106,7 +106,7 @@ raw_sites = load_kml_dataset(KML_PATH)
 df_sites = pd.DataFrame(raw_sites)
 
 # ---------------------------------------------------------
-# 4. App Header Header
+# 4. App Header
 # ---------------------------------------------------------
 st.markdown("""
     <div class='header-card'>
@@ -165,7 +165,7 @@ if uploaded_files:
             st.image(file, use_container_width=True)
 
 # ---------------------------------------------------------
-# 7. AI Vision Inspection Processing
+# 7. AI Vision Inspection Processing (Gemini 2.5)
 # ---------------------------------------------------------
 st.write("---")
 if st.button("🔍 Analyze Site", use_container_width=True):
@@ -174,7 +174,6 @@ if st.button("🔍 Analyze Site", use_container_width=True):
     elif not uploaded_files:
         st.warning("Please capture or upload at least one site photo.")
     else:
-        # Retrieve API Key from secrets or environment variables
         gemini_key = st.secrets.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
 
         if not gemini_key:
@@ -182,14 +181,17 @@ if st.button("🔍 Analyze Site", use_container_width=True):
         else:
             with st.spinner("🤖 Gemini AI Vision is inspecting equipment and analyzing photos..."):
                 try:
-                    # Configure API Client
+                    # Configure API Key
                     genai.configure(api_key=gemini_key)
 
                     # Prepare PIL Image formats
                     pil_images = [Image.open(f).convert("RGB") for f in uploaded_files]
 
-                    # Initialize model
-                    model = genai.GenerativeModel("gemini-1.5-flash")
+                    # Initialize model using modern gemini-2.5-flash
+                    try:
+                        model = genai.GenerativeModel("gemini-2.5-flash")
+                    except Exception:
+                        model = genai.GenerativeModel("models/gemini-2.5-flash")
 
                     prompt = f"""
                     You are an expert telecommunications site audit engineer inspecting field photos.
@@ -203,12 +205,12 @@ if st.button("🔍 Analyze Site", use_container_width=True):
                     4. **Final Verdict**: PASS, PASS WITH CONCERNS, or FAIL (Include justification and required corrective actions).
                     """
 
-                    # Call Gemini API
+                    # Send request to Gemini
                     response = model.generate_content([prompt, *pil_images])
 
                     st.success(f"✅ Audit completed for Site **{site_id_input}** by **{tech_name_input or 'Field Auditor'}**!")
                     
-                    # Display Results
+                    # Display Report
                     st.markdown("### 📋 AI Audit Analysis Report")
                     st.markdown(response.text)
 
