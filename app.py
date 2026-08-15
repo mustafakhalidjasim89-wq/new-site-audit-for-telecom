@@ -285,7 +285,7 @@ with tab_audit if logged_user == "admin" else st.container():
                         """
 
                         response = client.models.generate_content(
-                            model='gemini-2.5-flash',
+                            model='gemini-3.6-flash',
                             contents=[prompt, *pil_images]
                         )
 
