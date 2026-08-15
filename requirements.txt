@@ -3,3 +3,5 @@ pandas
 pillow
 google-genai
 streamlit-js-eval
+gspread
+oauth2client
