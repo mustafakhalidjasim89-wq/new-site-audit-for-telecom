@@ -165,7 +165,7 @@ if uploaded_files:
             st.image(file, use_container_width=True)
 
 # ---------------------------------------------------------
-# 7. AI Vision Inspection Processing (Gemini Vision)
+# 7. Dynamic AI Vision Inspection Processing
 # ---------------------------------------------------------
 st.write("---")
 if st.button("🔍 Analyze Site", use_container_width=True):
@@ -184,31 +184,40 @@ if st.button("🔍 Analyze Site", use_container_width=True):
                     # Configure API Key
                     genai.configure(api_key=gemini_key)
 
-                    # Prepare PIL Images
+                    # Prepare PIL Image formats
                     pil_images = [Image.open(f).convert("RGB") for f in uploaded_files]
 
-                    # Priority order of active multimodal production models
-                    active_models = [
-                        "gemini-2.0-flash",
-                        "gemini-1.5-flash",
-                        "gemini-1.5-pro",
+                    # 1. Dynamically retrieve models supported by your key
+                    available_models = [
+                        m.name.replace("models/", "") 
+                        for m in genai.list_models() 
+                        if "generateContent" in m.supported_generation_methods
                     ]
 
-                    model = None
-                    last_exception = None
+                    # 2. Hierarchy of preferred vision models
+                    preferred_order = [
+                        "gemini-1.5-flash",
+                        "gemini-1.5-flash-latest",
+                        "gemini-1.5-pro",
+                        "gemini-1.5-pro-latest",
+                        "gemini-pro-vision"
+                    ]
 
-                    # Iterate to pick the first working active model
-                    for model_name in active_models:
-                        try:
-                            candidate = genai.GenerativeModel(model_name)
-                            model = candidate
+                    # Match active model available on your endpoint
+                    selected_model_name = None
+                    for target in preferred_order:
+                        if target in available_models:
+                            selected_model_name = target
                             break
-                        except Exception as ex:
-                            last_exception = ex
-                            continue
 
-                    if model is None:
-                        raise last_exception or Exception("No active Gemini Vision model available.")
+                    if not selected_model_name:
+                        if available_models:
+                            selected_model_name = available_models[0]
+                        else:
+                            raise Exception("No active Gemini models found for this API key.")
+
+                    # Initialize model
+                    model = genai.GenerativeModel(selected_model_name)
 
                     prompt = f"""
                     You are an expert telecommunications site audit engineer inspecting field photos.
@@ -222,10 +231,10 @@ if st.button("🔍 Analyze Site", use_container_width=True):
                     4. **Final Verdict**: PASS, PASS WITH CONCERNS, or FAIL (Include justification and required corrective actions).
                     """
 
-                    # Send request to Gemini
+                    # Execute Multimodal Call
                     response = model.generate_content([prompt, *pil_images])
 
-                    st.success(f"✅ Audit completed for Site **{site_id_input}** by **{tech_name_input or 'Field Auditor'}**!")
+                    st.success(f"✅ Audit completed using `{selected_model_name}` for Site **{site_id_input}**!")
                     st.markdown("### 📋 AI Audit Analysis Report")
                     st.markdown(response.text)
 
