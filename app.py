@@ -1,5 +1,8 @@
 import sys
 import os
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 import streamlit as st
 import pandas as pd
 from PIL import Image
@@ -17,6 +20,56 @@ if BASE_DIR not in sys.path:
 
 from kml_parser import parse_telecom_kml
 from geo_utils import find_nearby_sites
+
+# ---------------------------------------------------------
+# Helper: Email Alert Sender (Exchange / Office 365)
+# ---------------------------------------------------------
+def send_email_notification(site_id, technician, status, report_text, user_lat, user_lon):
+    sender_email = st.secrets.get("SENDER_EMAIL") or os.environ.get("SENDER_EMAIL")
+    sender_password = st.secrets.get("SENDER_PASSWORD") or os.environ.get("SENDER_PASSWORD")
+    receiver_email = "mustafa.khalid@asiacell.com"
+    
+    smtp_server = st.secrets.get("EXCHANGE_SERVER", "smtp.office365.com")
+    smtp_port = int(st.secrets.get("EXCHANGE_PORT", 587))
+
+    if not sender_email or not sender_password:
+        st.warning("⚠️ Email secrets missing. Report saved to database, but email not sent.")
+        return False
+
+    try:
+        msg = MIMEMultipart()
+        msg['From'] = sender_email
+        msg['To'] = receiver_email
+        msg['Subject'] = f"🚨 New Site Audit Report: {site_id} [{status}]"
+
+        body = f"""
+        New Telecom Site Audit Submitted!
+
+        ====================================================
+        Site Code   : {site_id}
+        Technician  : {technician}
+        Status      : {status}
+        Coordinates : {user_lat}, {user_lon}
+        ====================================================
+
+        AI Inspection Analysis & Findings:
+        
+        {report_text}
+        """
+        msg.attach(MIMEText(body, 'plain'))
+
+        # Connect to Exchange / Office 365 SMTP Server
+        server = smtplib.SMTP(smtp_server, smtp_port)
+        server.ehlo()
+        server.starttls()
+        server.ehlo()
+        server.login(sender_email, sender_password)
+        server.send_message(msg)
+        server.quit()
+        return True
+    except Exception as e:
+        st.warning(f"⚠️ Report saved, but Exchange email failed: {str(e)}")
+        return False
 
 # ---------------------------------------------------------
 # Helper: Supabase Client Connection
@@ -43,6 +96,10 @@ def save_report_to_supabase(site_id, technician, status, report_text, user_lat, 
             "report_text": report_text
         }
         supabase.table("audit_reports").insert(data).execute()
+        
+        # Trigger Exchange Email directly to mustafa.khalid@asiacell.com
+        send_email_notification(site_id, technician, status, report_text, user_lat, user_lon)
+        
         return True
     except Exception as e:
         st.error(f"⚠️ Submission failed: {str(e)}")
@@ -230,7 +287,7 @@ with tab_audit if logged_user == "admin" else st.container():
                 else:
                     st.warning("⚠️ GPS Signal Required: Please enable device location permissions.")
 
-    # Photo Capture & Upload Section
+    # Compact Photo Upload Section
     st.markdown("### PHOTOS")
     uploaded_files = []
 
@@ -250,12 +307,13 @@ with tab_audit if logged_user == "admin" else st.container():
 
         if uploaded_files:
             st.write(f"Selected Photos ({len(uploaded_files)}):")
-            cols = st.columns(min(len(uploaded_files), 4))
+            # Compact thumbnail preview without container stretching
+            cols = st.columns(6)
             for idx, file in enumerate(uploaded_files):
-                with cols[idx % 4]:
-                    st.image(file, use_container_width=True)
+                with cols[idx % 6]:
+                    st.image(file, width=120)
 
-    # Direct Submission (Hides Report from Technician)
+    # Direct Submission Action
     st.write("---")
     if st.button("📤 Submit Site Audit to Supervisor", use_container_width=True, disabled=not is_location_valid):
         if not uploaded_files:
@@ -296,17 +354,12 @@ with tab_audit if logged_user == "admin" else st.container():
                         elif "CONCERNS" in report_text.upper():
                             status_verdict = "PASS WITH CONCERNS"
 
-                        # Save report to database without showing report details to technician
+                        # Save to database and trigger Exchange email directly to supervisor
                         if save_report_to_supabase(selected_site_code, tech_name_input or 'Unassigned', status_verdict, report_text, user_lat, user_lon):
                             st.success(f"✅ Audit report for Site **{selected_site_code}** successfully submitted to supervisor!")
-                            
-                            # Only display report content if admin is logged in
-                            if logged_user == "admin":
-                                st.markdown("### 📋 AI Audit Analysis (Admin View Only)")
-                                st.markdown(report_text)
 
                     except Exception as e:
-                        st.error(f"⚠️ Audit processing failed: {str(e)}")
+                        st.error(f"⚠️ Audit submission failed: {str(e)}")
 
 # ---------------------------------------------------------
 # TAB 2: Admin Remote Dashboard
