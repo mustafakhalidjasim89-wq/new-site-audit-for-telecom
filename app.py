@@ -201,7 +201,7 @@ if st.button("🔍 Analyze Site", use_container_width=True):
 
                     # Call generation endpoint using supported model string
                     response = client.models.generate_content(
-                        model='gemini-2.5-flash',
+                        model='gemini-3.6-flash',
                         contents=[prompt, *pil_images]
                     )
 
