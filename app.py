@@ -7,6 +7,8 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import streamlit as st
 import pandas as pd
+import numpy as np
+import cv2
 from PIL import Image
 from math import radians, cos, sin, asin, sqrt
 import resend
@@ -14,6 +16,13 @@ from google import genai
 from google.genai.errors import APIError
 from streamlit_js_eval import get_geolocation
 from supabase import create_client, Client
+
+# PyZBar for barcode/QR reading (fails gracefully if library is missing)
+try:
+    from pyzbar.pyzbar import decode as pyzbar_decode
+    PYZBAR_AVAILABLE = True
+except ImportError:
+    PYZBAR_AVAILABLE = False
 
 # ---------------------------------------------------------
 # 0. Fix Import Paths for Streamlit Cloud Runtime
@@ -24,6 +33,36 @@ if BASE_DIR not in sys.path:
 
 from kml_parser import parse_telecom_kml
 from geo_utils import find_nearby_sites
+
+# ---------------------------------------------------------
+# Helper: Barcode & Label Scanner
+# ---------------------------------------------------------
+def scan_equipment_barcodes(uploaded_files):
+    """
+    Extracts 1D/2D Barcodes and Asset Tags from uploaded images using OpenCV & PyZBar.
+    """
+    if not PYZBAR_AVAILABLE:
+        return []
+
+    scanned_items = []
+    for idx, file in enumerate(uploaded_files):
+        try:
+            file.seek(0)
+            file_bytes = np.asarray(bytearray(file.read()), dtype=np.uint8)
+            file.seek(0)
+            img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+
+            if img is not None:
+                barcodes = pyzbar_decode(img)
+                for barcode in barcodes:
+                    scanned_items.append({
+                        "Photo": f"Photo #{idx + 1}",
+                        "Type": barcode.type,
+                        "Barcode / Serial": barcode.data.decode("utf-8")
+                    })
+        except Exception:
+            continue
+    return scanned_items
 
 # ---------------------------------------------------------
 # Helper: Email Dispatcher via Gmail SMTP (Fallback to Resend)
@@ -40,7 +79,7 @@ def send_email_notification(site_id, technician, status, report_text, user_lat, 
 
     html_body = f"""
     <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 8px;">
-        <h2 style="color: #0284c7; margin-bottom: 5px;">📡 Telecom Site Audit Report</h2>
+        <h2 style="color: #0284c7; margin-bottom: 5px;">📡 NGT Telecom Site Audit Report</h2>
         <hr style="border: 0; border-top: 1px solid #eee;">
         
         <table style="width: 100%; margin-top: 15px; font-size: 14px;">
@@ -52,7 +91,7 @@ def send_email_notification(site_id, technician, status, report_text, user_lat, 
 
         <hr style="border: 0; border-top: 1px solid #eee; margin: 20px 0;">
 
-        <h3 style="color: #333;">🤖 AI Inspection Findings</h3>
+        <h3 style="color: #333;">🤖 NGT Equipment Inventory & Inspection Findings</h3>
         <div style="background-color: #f8fafc; padding: 15px; border-left: 4px solid #0284c7; border-radius: 4px; white-space: pre-wrap; font-size: 13px; line-height: 1.6;">
 {report_text}
         </div>
@@ -261,13 +300,13 @@ df_sites = pd.DataFrame(raw_sites)
 # ---------------------------------------------------------
 st.markdown("""
     <div class='header-card'>
-        <h2 style='color: #00d2ff; margin:0;'>📡 Telecom Site Audit AI</h2>
+        <h2 style='color: #00d2ff; margin:0;'>📡 Telecom Site Audit AI (NGT Inventory)</h2>
         <p style='color: #8e9aaf; margin:4px 0 0 0;'>Designed by Mustafa Khalid / Supervisor / R3-BAG-CLS5</p>
     </div>
 """, unsafe_allow_html=True)
 
 if logged_user == "admin":
-    tab_audit, tab_reports = st.tabs(["🔍 Field Site Audit", "📊 Admin Remote Reports Dashboard"])
+    tab_audit, tab_reports = st.tabs(["🔍 Field Site Audit & NGT Scanner", "📊 Admin Remote Reports Dashboard"])
 else:
     tab_audit = st.container()
     tab_reports = None
@@ -351,7 +390,7 @@ with tab_audit if logged_user == "admin" else st.container():
 
     # Submission Action with Gemini 429 Retry Backoff
     st.write("---")
-    if st.button("📤 Submit Site Audit to Supervisor", use_container_width=True, disabled=not is_location_valid):
+    if st.button("📤 Submit Site Audit & NGT Report", use_container_width=True, disabled=not is_location_valid):
         if not uploaded_files:
             st.warning("Please capture or upload at least one site photo.")
         else:
@@ -360,22 +399,50 @@ with tab_audit if logged_user == "admin" else st.container():
             if not gemini_key:
                 st.error("❌ Missing Gemini API Key! Configure `GEMINI_API_KEY` in Streamlit Secrets.")
             else:
-                with st.spinner("🤖 Processing audit with AI and submitting directly..."):
+                with st.spinner("🏷️ Scanning Barcodes & Processing NGT Inventory with AI..."):
                     try:
+                        # 1. Automatic Barcode Scanning
+                        barcodes_found = scan_equipment_barcodes(uploaded_files)
+                        if barcodes_found:
+                            st.markdown("#### 🏷️ Scanned Barcodes & Asset Labels")
+                            st.dataframe(pd.DataFrame(barcodes_found), use_container_width=True)
+                            barcode_summary = "\n".join([f"- [{b['Photo']}] ({b['Type']}) Serial: {b['Barcode / Serial']}" for b in barcodes_found])
+                        else:
+                            barcode_summary = "No machine-readable 1D/2D barcodes extracted by CV. Read human-printed labels directly from the photos."
+
+                        # 2. Setup Gemini AI Client
                         client = genai.Client(api_key=gemini_key)
                         pil_images = [Image.open(f).convert("RGB") for f in uploaded_files]
 
+                        # NGT Structured Inventory & Audit Prompt
                         prompt = f"""
-                        You are an expert telecommunications site audit engineer inspecting field photos.
-                        Site ID: {selected_site_code}
-                        Technician: {tech_name_input or 'Unassigned'}
+You are an expert telecommunications site audit engineer performing an NGT Equipment Asset & Quantity Inventory inspection.
+Site ID: {selected_site_code}
+Technician: {tech_name_input or 'Unassigned'}
 
-                        Analyze the provided image(s) thoroughly and generate a structured site inspection report:
-                        1. **Equipment Identified**: Cabinets (Huawei/ETP48), Rectifiers, Antennas, RRUs, Microwave transmission dishes, Lithium/Lead-Acid Batteries, Solar installations.
-                        2. **Installation Quality & Cabling**: Cable routing neatness, grounding status, physical damage, cleanliness.
-                        3. **Defects & Safety Hazards**: Uncapped or exposed cables, water ingress signs, burnt connectors, loose mountings.
-                        4. **Final Verdict**: PASS, PASS WITH CONCERNS, or FAIL (Include justification and required corrective actions).
+Auto-Scanned Barcodes/Asset Labels:
+{barcode_summary}
+
+Analyze the provided image(s) thoroughly and generate a structured NGT site inspection and equipment count report:
+
+1. **NGT EQUIPMENT QUANTITY COUNT & AUDIT**:
+   - **Antennas**: Count RF sector antennas and microwave transmission dishes (note brand/type if visible).
+   - **Batteries**: Count total lithium battery packs and lead-acid battery strings.
+   - **Power Systems**: Count active Huawei ETP48/rectifier cabinets and rectifier modules.
+   - **RAN / Transmission Equipment**: Count active RRUs/RRHs, BBU units, and RTN microwave ODUs.
+
+2. **BARCODE & LABEL VERIFICATION**:
+   - Cross-reference visible barcode tags and printed labels against the detected equipment.
+   - List any unreadable, damaged, or missing asset barcode labels.
+
+3. **INSTALLATION QUALITY & CABLING**:
+   - Cable routing neatness, grounding connections, physical integrity, cleanliness.
+
+4. **FINAL VERDICT & DEFECTS**:
+   - PASS, PASS WITH CONCERNS, or FAIL (Include justification and required corrective actions).
                         """
+
+                        target_model = st.secrets.get("GEMINI_MODEL") or os.environ.get("GEMINI_MODEL") or "gemini-3.5-flash-lite"
 
                         # Exponential retry mechanism for 429 rate limits
                         max_retries = 3
@@ -384,7 +451,7 @@ with tab_audit if logged_user == "admin" else st.container():
                         for attempt in range(max_retries):
                             try:
                                 response = client.models.generate_content(
-                                    model='gemini-3.5-flash-lite',
+                                    model=target_model,
                                     contents=[prompt, *pil_images]
                                 )
                                 report_text = response.text
@@ -407,13 +474,17 @@ with tab_audit if logged_user == "admin" else st.container():
                             elif "CONCERNS" in report_text.upper():
                                 status_verdict = "PASS WITH CONCERNS"
 
+                            # Display Report
+                            st.subheader("📋 NGT Audit & Quantity Inventory Report")
+                            st.markdown(report_text)
+
                             # Save to Supabase and dispatch email
                             if save_report_to_supabase(selected_site_code, tech_name_input or 'Unassigned', status_verdict, report_text, user_lat, user_lon):
-                                st.success(f"✅ Audit report for Site **{selected_site_code}** successfully submitted to supervisor!")
+                                st.success(f"✅ NGT Audit report for Site **{selected_site_code}** successfully submitted to supervisor!")
 
                     except APIError as e:
                         if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                            st.error("⏳ **API Quota Exceeded**: You've reached the Gemini Free Tier daily limit (20 requests/day). Switch to pay-as-you-go in Google AI Studio or try again later.")
+                            st.error("⏳ **API Quota Exceeded**: You've reached the daily rate limit. Switch to pay-as-you-go or `gemini-3.5-flash-lite` in Secrets.")
                         else:
                             st.error(f"⚠️ Gemini API Error: {str(e)}")
                     except Exception as e:
