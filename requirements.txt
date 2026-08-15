@@ -6,3 +6,5 @@ streamlit-js-eval
 supabase
 resend
 openpyxl
+anthropic
+
