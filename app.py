@@ -165,7 +165,7 @@ if uploaded_files:
             st.image(file, use_container_width=True)
 
 # ---------------------------------------------------------
-# 7. AI Vision Inspection Processing (Gemini 2.5)
+# 7. AI Vision Inspection Processing (Gemini Vision)
 # ---------------------------------------------------------
 st.write("---")
 if st.button("🔍 Analyze Site", use_container_width=True):
@@ -184,14 +184,31 @@ if st.button("🔍 Analyze Site", use_container_width=True):
                     # Configure API Key
                     genai.configure(api_key=gemini_key)
 
-                    # Prepare PIL Image formats
+                    # Prepare PIL Images
                     pil_images = [Image.open(f).convert("RGB") for f in uploaded_files]
 
-                    # Initialize model using modern gemini-2.5-flash
-                    try:
-                        model = genai.GenerativeModel("gemini-2.5-flash")
-                    except Exception:
-                        model = genai.GenerativeModel("models/gemini-2.5-flash")
+                    # Priority order of active multimodal production models
+                    active_models = [
+                        "gemini-2.0-flash",
+                        "gemini-1.5-flash",
+                        "gemini-1.5-pro",
+                    ]
+
+                    model = None
+                    last_exception = None
+
+                    # Iterate to pick the first working active model
+                    for model_name in active_models:
+                        try:
+                            candidate = genai.GenerativeModel(model_name)
+                            model = candidate
+                            break
+                        except Exception as ex:
+                            last_exception = ex
+                            continue
+
+                    if model is None:
+                        raise last_exception or Exception("No active Gemini Vision model available.")
 
                     prompt = f"""
                     You are an expert telecommunications site audit engineer inspecting field photos.
@@ -209,8 +226,6 @@ if st.button("🔍 Analyze Site", use_container_width=True):
                     response = model.generate_content([prompt, *pil_images])
 
                     st.success(f"✅ Audit completed for Site **{site_id_input}** by **{tech_name_input or 'Field Auditor'}**!")
-                    
-                    # Display Report
                     st.markdown("### 📋 AI Audit Analysis Report")
                     st.markdown(response.text)
 
