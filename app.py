@@ -3,9 +3,10 @@ import os
 import streamlit as st
 import pandas as pd
 from PIL import Image
+import google.generativeai as genai
 
 # ---------------------------------------------------------
-# 0. Setup Root Path for Streamlit Cloud Imports
+# 0. Fix Import Paths for Streamlit Cloud Runtime
 # ---------------------------------------------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 if BASE_DIR not in sys.path:
@@ -15,7 +16,7 @@ from kml_parser import parse_telecom_kml
 from geo_utils import find_nearby_sites
 
 # ---------------------------------------------------------
-# 1. Page Configuration & Custom CSS (Matching Dark UI)
+# 1. Page Configuration & Custom UI Styling
 # ---------------------------------------------------------
 st.set_page_config(
     page_title="Telecom Site Audit AI",
@@ -23,30 +24,31 @@ st.set_page_config(
     layout="wide"
 )
 
-# Apply Dark Glassmorphism Theme to match image
+# Dark glassmorphism theme matching your interface layout
 st.markdown("""
     <style>
     .stApp {
         background-color: #1a1d24;
         color: #ffffff;
     }
-    .card-box {
-        background-color: #262a34;
+    .header-card {
+        background-color: #222630;
+        padding: 18px;
         border-radius: 12px;
-        padding: 20px;
         margin-bottom: 20px;
         border: 1px solid #343a46;
     }
     .stButton>button {
-        background-color: #3b82f6;
+        background-color: #2563eb;
         color: white;
         border-radius: 8px;
         border: none;
-        padding: 10px 24px;
+        padding: 12px 24px;
         font-weight: 600;
+        font-size: 16px;
     }
     .stButton>button:hover {
-        background-color: #2563eb;
+        background-color: #1d4ed8;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -64,7 +66,6 @@ if "authenticated" not in st.session_state:
     st.session_state["authenticated"] = False
 
 if not st.session_state["authenticated"]:
-    st.markdown("<div class='card-box'>", unsafe_allow_html=True)
     st.title("🔒 Telecom Site Audit AI - Login")
     
     with st.form("login_form"):
@@ -79,17 +80,16 @@ if not st.session_state["authenticated"]:
                 st.rerun()
             else:
                 st.error("Invalid username or password.")
-    st.markdown("</div>", unsafe_allow_html=True)
     st.stop()
 
-# Logout Sidebar
+# Sidebar user session management
 st.sidebar.write(f"Logged in as: **{st.session_state.get('logged_user')}**")
 if st.sidebar.button("Log Out"):
     st.session_state["authenticated"] = False
     st.rerun()
 
 # ---------------------------------------------------------
-# 3. Load KML Data
+# 3. KML Dataset Loader
 # ---------------------------------------------------------
 KML_PATH = os.path.join(BASE_DIR, "data", "sites.kml")
 
@@ -106,17 +106,17 @@ raw_sites = load_kml_dataset(KML_PATH)
 df_sites = pd.DataFrame(raw_sites)
 
 # ---------------------------------------------------------
-# 4. Header UI (Designed to match your image)
+# 4. App Header Header
 # ---------------------------------------------------------
 st.markdown("""
-    <div style='background-color: #222630; padding: 18px; border-radius: 12px; margin-bottom: 20px;'>
+    <div class='header-card'>
         <h2 style='color: #00d2ff; margin:0;'>📡 Telecom Site Audit AI</h2>
         <p style='color: #8e9aaf; margin:4px 0 0 0;'>Designed by Mustafa Khalid / Supervisor / R3-BAG-CLS5</p>
     </div>
 """, unsafe_allow_html=True)
 
 # ---------------------------------------------------------
-# 5. SITE ID & TECHNICIAN NAME Input Card
+# 5. Site Identification & Field Inputs
 # ---------------------------------------------------------
 col_site, col_tech = st.columns(2)
 
@@ -126,22 +126,21 @@ with col_site:
 with col_tech:
     tech_name_input = st.text_input("TECHNICIAN NAME", placeholder="e.g. Alaa Fadel").strip()
 
-# KML Location Lookup Integration
+# KML Coordinates Match & Nearby Sites Lookup
 if site_id_input and not df_sites.empty:
     matched = df_sites[df_sites['site_code'].str.upper() == site_id_input]
     if not matched.empty:
         site_data = matched.iloc[0].to_dict()
-        st.success(f"📍 KML Match Found: Lat {site_data.get('latitude')}, Lon {site_data.get('longitude')}")
+        st.success(f"📍 Location Found: Latitude {site_data.get('latitude')}, Longitude {site_data.get('longitude')}")
         
-        # Nearby Sites Lookup
         if site_data.get('latitude') and site_data.get('longitude'):
             nearby = find_nearby_sites(site_data['latitude'], site_data['longitude'], raw_sites, radius_km=5.0)
             if nearby:
-                with st.expander(f"Found {len(nearby)} Nearby Sites (5km Radius)"):
+                with st.expander(f"📍 View {len(nearby)} Nearby Sites (Within 5km)"):
                     st.dataframe(pd.DataFrame(nearby)[['site_code', 'name', 'distance_km']], use_container_width=True)
 
 # ---------------------------------------------------------
-# 6. PHOTOS Upload & Camera Section
+# 6. Photos Capture & Upload
 # ---------------------------------------------------------
 st.markdown("### PHOTOS")
 
@@ -149,7 +148,7 @@ input_mode = st.radio("Choose Input Method:", ["Camera", "Gallery"], horizontal=
 
 uploaded_files = []
 if input_mode == "Camera":
-    img_file = st.camera_input("Capture Photo")
+    img_file = st.camera_input("Capture Site Photo")
     if img_file:
         uploaded_files.append(img_file)
 else:
@@ -157,16 +156,16 @@ else:
     if img_files:
         uploaded_files.extend(img_files)
 
-# Preview Uploaded Images
+# Preview uploaded site images
 if uploaded_files:
-    st.write(f"Uploaded Photos ({len(uploaded_files)}):")
+    st.write(f"Selected Photos ({len(uploaded_files)}):")
     cols = st.columns(min(len(uploaded_files), 4))
     for idx, file in enumerate(uploaded_files):
         with cols[idx % 4]:
             st.image(file, use_container_width=True)
 
 # ---------------------------------------------------------
-# 7. Analyze Site Button
+# 7. AI Vision Inspection Processing
 # ---------------------------------------------------------
 st.write("---")
 if st.button("🔍 Analyze Site", use_container_width=True):
@@ -175,5 +174,43 @@ if st.button("🔍 Analyze Site", use_container_width=True):
     elif not uploaded_files:
         st.warning("Please capture or upload at least one site photo.")
     else:
-        st.success("Analyzing site photos with AI Vision...")
-        st.info(f"Audit completed for Site **{site_id_input}** by Technician **{tech_name_input or 'Unassigned'}**!")
+        # Retrieve API Key from secrets or environment variables
+        gemini_key = st.secrets.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
+
+        if not gemini_key:
+            st.error("❌ Missing Gemini API Key! Please configure `GEMINI_API_KEY` in Streamlit Secrets.")
+        else:
+            with st.spinner("🤖 Gemini AI Vision is inspecting equipment and analyzing photos..."):
+                try:
+                    # Configure API Client
+                    genai.configure(api_key=gemini_key)
+
+                    # Prepare PIL Image formats
+                    pil_images = [Image.open(f).convert("RGB") for f in uploaded_files]
+
+                    # Initialize model
+                    model = genai.GenerativeModel("gemini-1.5-flash")
+
+                    prompt = f"""
+                    You are an expert telecommunications site audit engineer inspecting field photos.
+                    Site ID: {site_id_input}
+                    Technician: {tech_name_input or 'Unassigned'}
+
+                    Analyze the provided image(s) thoroughly and generate a structured site inspection report:
+                    1. **Equipment Identified**: Cabinets (Huawei/ETP48), Rectifiers, Antennas, RRUs, Microwave transmission dishes, Lithium/Lead-Acid Batteries, Solar installations.
+                    2. **Installation Quality & Cabling**: Cable routing neatness, grounding status, physical damage, cleanliness.
+                    3. **Defects & Safety Hazards**: Uncapped or exposed cables, water ingress signs, burnt connectors, loose mountings.
+                    4. **Final Verdict**: PASS, PASS WITH CONCERNS, or FAIL (Include justification and required corrective actions).
+                    """
+
+                    # Call Gemini API
+                    response = model.generate_content([prompt, *pil_images])
+
+                    st.success(f"✅ Audit completed for Site **{site_id_input}** by **{tech_name_input or 'Field Auditor'}**!")
+                    
+                    # Display Results
+                    st.markdown("### 📋 AI Audit Analysis Report")
+                    st.markdown(response.text)
+
+                except Exception as e:
+                    st.error(f"⚠️ AI Vision Analysis failed: {str(e)}")
