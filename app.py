@@ -1,11 +1,19 @@
 import sys
 import os
 import io
-import base64
+import time
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 import streamlit as st
 import pandas as pd
 from PIL import Image
-import anthropic
+from math import radians, cos, sin, asin, sqrt
+import resend
+from google import genai
+from google.genai.errors import APIError
+from streamlit_js_eval import get_geolocation
+from supabase import create_client, Client
 
 # ---------------------------------------------------------
 # 0. Fix Import Paths for Streamlit Cloud Runtime
@@ -18,27 +26,149 @@ from kml_parser import parse_telecom_kml
 from geo_utils import find_nearby_sites
 
 # ---------------------------------------------------------
-# Helper: Convert Uploaded Image to Claude API Payload
+# Helper: Email Dispatcher via Gmail SMTP (Fallback to Resend)
 # ---------------------------------------------------------
-def process_image_for_claude(uploaded_file, max_dim=1024):
-    img = Image.open(uploaded_file).convert("RGB")
-    img.thumbnail((max_dim, max_dim))
+def send_email_notification(site_id, technician, status, report_text, user_lat, user_lon):
+    receiver_email = st.secrets.get("ADMIN_RECEIVER_EMAIL") or os.environ.get("ADMIN_RECEIVER_EMAIL") or "mustafa.khalid@asiacell.com"
+    sender_email = st.secrets.get("SENDER_EMAIL") or os.environ.get("SENDER_EMAIL") or "mustafa.khalid@asiacell.com"
+    sender_password = st.secrets.get("SENDER_PASSWORD") or os.environ.get("SENDER_PASSWORD")
     
-    buffer = io.BytesIO()
-    img.save(buffer, format="JPEG")
-    base64_str = base64.b64encode(buffer.getvalue()).decode("utf-8")
-    
-    return {
-        "type": "image",
-        "source": {
-            "type": "base64",
-            "media_type": "image/jpeg",
-            "data": base64_str
-        }
-    }
+    gmail_server = st.secrets.get("GMAIL_SERVER") or os.environ.get("GMAIL_SERVER") or "smtp.gmail.com"
+    gmail_port = int(st.secrets.get("GMAIL_PORT") or os.environ.get("GMAIL_PORT") or 587)
+
+    status_color = "#16a34a" if status == "PASS" else ("#ca8a04" if "CONCERNS" in status else "#dc2626")
+
+    html_body = f"""
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 8px;">
+        <h2 style="color: #0284c7; margin-bottom: 5px;">📡 Telecom Site Audit Report</h2>
+        <hr style="border: 0; border-top: 1px solid #eee;">
+        
+        <table style="width: 100%; margin-top: 15px; font-size: 14px;">
+            <tr><td><strong>Site ID:</strong></td><td>{site_id}</td></tr>
+            <tr><td><strong>Technician:</strong></td><td>{technician}</td></tr>
+            <tr><td><strong>Coordinates:</strong></td><td>{user_lat}, {user_lon}</td></tr>
+            <tr><td><strong>Audit Status:</strong></td><td><span style="background-color: {status_color}; color: white; padding: 4px 8px; border-radius: 4px; font-weight: bold;">{status}</span></td></tr>
+        </table>
+
+        <hr style="border: 0; border-top: 1px solid #eee; margin: 20px 0;">
+
+        <h3 style="color: #333;">🤖 AI Inspection Findings</h3>
+        <div style="background-color: #f8fafc; padding: 15px; border-left: 4px solid #0284c7; border-radius: 4px; white-space: pre-wrap; font-size: 13px; line-height: 1.6;">
+{report_text}
+        </div>
+
+        <p style="font-size: 11px; color: #94a3b8; margin-top: 25px; text-align: center;">
+            Automated Audit Notification • Asiacell R3-BAG-CLS5
+        </p>
+    </div>
+    """
+
+    # Primary Method: Gmail SMTP Dispatch
+    if sender_password and sender_password != "your-actual-asiacell-password":
+        try:
+            msg = MIMEMultipart("alternative")
+            msg["Subject"] = f"🚨 Site Audit Report: {site_id} [{status}]"
+            msg["From"] = sender_email
+            msg["To"] = receiver_email
+            msg.attach(MIMEText(html_body, "html"))
+
+            server = smtplib.SMTP(gmail_server, gmail_port)
+            server.starttls()
+            server.login(sender_email, sender_password)
+            server.sendmail(sender_email, receiver_email, msg.as_string())
+            server.quit()
+            return True
+        except Exception as e:
+            st.warning(f"⚠️ Gmail SMTP dispatch failed ({str(e)}). Attempting Resend API...")
+
+    # Secondary Method: Resend API
+    resend_key = st.secrets.get("RESEND_API_KEY") or os.environ.get("RESEND_API_KEY")
+    if resend_key:
+        try:
+            resend.api_key = resend_key
+            resend.Emails.send({
+                "from": "Telecom Audit <onboarding@resend.dev>",
+                "to": receiver_email,
+                "subject": f"🚨 Site Audit Report: {site_id} [{status}]",
+                "html": html_body
+            })
+            return True
+        except Exception as e:
+            st.warning(f"⚠️ Resend dispatch failed: {str(e)}")
+
+    st.warning("⚠️ Email notification skipped: Configure Gmail App Password or Resend API key.")
+    return False
 
 # ---------------------------------------------------------
-# 1. Page Configuration & Custom Dark UI Styling
+# Helper: Supabase Client Connection
+# ---------------------------------------------------------
+def get_supabase_client() -> Client:
+    url = st.secrets.get("SUPABASE_URL") or os.environ.get("SUPABASE_URL")
+    key = st.secrets.get("SUPABASE_KEY") or os.environ.get("SUPABASE_KEY")
+    if not url or not key:
+        return None
+    return create_client(url, key)
+
+def save_report_to_supabase(site_id, technician, status, report_text, user_lat, user_lon):
+    try:
+        supabase = get_supabase_client()
+        if not supabase:
+            st.error("❌ Supabase URL or Key missing in Streamlit Secrets!")
+            return False
+
+        data = {
+            "site_id": site_id,
+            "technician": technician,
+            "coordinates": f"{user_lat}, {user_lon}" if user_lat else "N/A",
+            "status": status,
+            "report_text": report_text
+        }
+        supabase.table("audit_reports").insert(data).execute()
+        
+        # Trigger email notification
+        send_email_notification(site_id, technician, status, report_text, user_lat, user_lon)
+        return True
+    except Exception as e:
+        st.error(f"⚠️ Database submission failed: {str(e)}")
+        return False
+
+def fetch_supabase_reports():
+    try:
+        supabase = get_supabase_client()
+        if not supabase:
+            return pd.DataFrame()
+        res = supabase.table("audit_reports").select("*").order("created_at", desc=True).execute()
+        return pd.DataFrame(res.data)
+    except Exception as e:
+        st.error(f"⚠️ Failed to fetch remote reports: {str(e)}")
+        return pd.DataFrame()
+
+# ---------------------------------------------------------
+# Helper: Convert DataFrame to Excel Binary Buffer
+# ---------------------------------------------------------
+def convert_df_to_excel(df):
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='Audit_Reports')
+    output.seek(0)
+    return output.getvalue()
+
+# ---------------------------------------------------------
+# Helper: Haversine Distance Formula (km)
+# ---------------------------------------------------------
+def calculate_distance_km(lat1, lon1, lat2, lon2):
+    try:
+        lat1, lon1, lat2, lon2 = map(radians, [float(lat1), float(lon1), float(lat2), float(lon2)])
+        dlat = lat2 - lat1
+        dlon = lon2 - lon1
+        a = sin(dlat / 2)**2 + cos(lat1) * cos(lat2) * sin(dlon / 2)**2
+        c = 2 * asin(sqrt(a))
+        return c * 6371.0
+    except (ValueError, TypeError):
+        return float('inf')
+
+# ---------------------------------------------------------
+# 1. Page Config & Custom Dark UI Styling
 # ---------------------------------------------------------
 st.set_page_config(
     page_title="Telecom Site Audit AI",
@@ -103,7 +233,8 @@ if not st.session_state["authenticated"]:
                 st.error("Invalid username or password.")
     st.stop()
 
-st.sidebar.write(f"Logged in as: **{st.session_state.get('logged_user')}**")
+logged_user = st.session_state.get('logged_user')
+st.sidebar.write(f"Logged in as: **{logged_user}**")
 if st.sidebar.button("Log Out"):
     st.session_state["authenticated"] = False
     st.rerun()
@@ -126,7 +257,7 @@ raw_sites = load_kml_dataset(KML_PATH)
 df_sites = pd.DataFrame(raw_sites)
 
 # ---------------------------------------------------------
-# 4. App Header
+# 4. Header & Navigation Tabs
 # ---------------------------------------------------------
 st.markdown("""
     <div class='header-card'>
@@ -135,100 +266,182 @@ st.markdown("""
     </div>
 """, unsafe_allow_html=True)
 
-# ---------------------------------------------------------
-# 5. Site Identification & Field Inputs
-# ---------------------------------------------------------
-col_site, col_tech = st.columns(2)
-
-with col_site:
-    site_id_input = st.text_input("SITE ID", placeholder="e.g. IQ-BG-1042 or BAG6436").strip().upper()
-
-with col_tech:
-    tech_name_input = st.text_input("TECHNICIAN NAME", placeholder="e.g. Alaa Fadel").strip()
-
-if site_id_input and not df_sites.empty:
-    matched = df_sites[df_sites['site_code'].str.upper() == site_id_input]
-    if not matched.empty:
-        site_data = matched.iloc[0].to_dict()
-        st.success(f"📍 Location Found: Latitude {site_data.get('latitude')}, Longitude {site_data.get('longitude')}")
-        
-        if site_data.get('latitude') and site_data.get('longitude'):
-            nearby = find_nearby_sites(site_data['latitude'], site_data['longitude'], raw_sites, radius_km=5.0)
-            if nearby:
-                with st.expander(f"📍 View {len(nearby)} Nearby Sites (Within 5km)"):
-                    st.dataframe(pd.DataFrame(nearby)[['site_code', 'name', 'distance_km']], use_container_width=True)
-
-# ---------------------------------------------------------
-# 6. Photos Capture & Upload
-# ---------------------------------------------------------
-st.markdown("### PHOTOS")
-
-input_mode = st.radio("Choose Input Method:", ["Camera", "Gallery"], horizontal=True)
-
-uploaded_files = []
-if input_mode == "Camera":
-    img_file = st.camera_input("Capture Site Photo")
-    if img_file:
-        uploaded_files.append(img_file)
+if logged_user == "admin":
+    tab_audit, tab_reports = st.tabs(["🔍 Field Site Audit", "📊 Admin Remote Reports Dashboard"])
 else:
-    img_files = st.file_uploader("Pick from gallery", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
-    if img_files:
-        uploaded_files.extend(img_files)
-
-if uploaded_files:
-    st.write(f"Selected Photos ({len(uploaded_files)}):")
-    cols = st.columns(min(len(uploaded_files), 4))
-    for idx, file in enumerate(uploaded_files):
-        with cols[idx % 4]:
-            st.image(file, use_container_width=True)
+    tab_audit = st.container()
+    tab_reports = None
 
 # ---------------------------------------------------------
-# 7. AI Vision Processing (Claude API)
+# TAB 1: Field Site Audit
 # ---------------------------------------------------------
-st.write("---")
-if st.button("🔍 Analyze Site", use_container_width=True):
-    if not site_id_input:
-        st.warning("Please enter a SITE ID before analyzing.")
-    elif not uploaded_files:
-        st.warning("Please capture or upload at least one site photo.")
-    else:
-        anthropic_key = st.secrets.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
+with tab_audit if logged_user == "admin" else st.container():
+    col_site, col_tech = st.columns(2)
 
-        if not anthropic_key:
-            st.error("❌ Missing Anthropic API Key! Please configure `ANTHROPIC_API_KEY` in Streamlit Secrets.")
+    with col_site:
+        if not df_sites.empty and 'site_code' in df_sites.columns:
+            site_list = sorted(df_sites['site_code'].unique().tolist())
+            selected_site_code = st.selectbox("SELECT SITE ID", options=["-- Select Site --"] + site_list)
         else:
-            with st.spinner("🤖 Claude 3.5 Sonnet is inspecting equipment and analyzing photos..."):
-                try:
-                    client = anthropic.Anthropic(api_key=anthropic_key)
+            selected_site_code = st.selectbox("SELECT SITE ID", options=["-- No Sites Found --"])
 
-                    # Prepare image items for Claude API payload
-                    message_content = [process_image_for_claude(f) for f in uploaded_files]
+    with col_tech:
+        tech_name_input = st.text_input("TECHNICIAN NAME", placeholder="e.g. Alaa Fadel").strip()
 
-                    prompt = f"""
-                    You are an expert telecommunications site audit engineer inspecting field photos.
-                    Site ID: {site_id_input}
-                    Technician: {tech_name_input or 'Unassigned'}
+    # Fetch GPS Location
+    loc = get_geolocation()
+    user_lat, user_lon = None, None
 
-                    Analyze the provided image(s) thoroughly and generate a structured site inspection report:
-                    1. **Equipment Identified**: Cabinets (Huawei/ETP48), Rectifiers, Antennas, RRUs, Microwave transmission dishes, Lithium/Lead-Acid Batteries, Solar installations.
-                    2. **Installation Quality & Cabling**: Cable routing neatness, grounding status, physical damage, cleanliness.
-                    3. **Defects & Safety Hazards**: Uncapped or exposed cables, water ingress signs, burnt connectors, loose mountings.
-                    4. **Final Verdict**: PASS, PASS WITH CONCERNS, or FAIL (Include justification and required corrective actions).
-                    """
+    if loc and 'coords' in loc:
+        user_lat = loc['coords']['latitude']
+        user_lon = loc['coords']['longitude']
+        st.sidebar.success(f"🌐 GPS Active: {user_lat:.4f}, {user_lon:.4f}")
+    else:
+        st.sidebar.warning("⚠️ GPS inactive. Please enable browser location permissions.")
 
-                    message_content.append({"type": "text", "text": prompt})
+    # Geofence Check (3km Limit)
+    is_location_valid = False
+    site_data = None
 
-                    response = client.messages.create(
-                        model="claude-3-5-sonnet-20241022",
-                        max_tokens=1024,
-                        messages=[{"role": "user", "content": message_content}]
-                    )
+    if selected_site_code and selected_site_code != "-- Select Site --" and not df_sites.empty:
+        matched = df_sites[df_sites['site_code'] == selected_site_code]
+        if not matched.empty:
+            site_data = matched.iloc[0].to_dict()
+            site_lat = site_data.get('latitude')
+            site_lon = site_data.get('longitude')
 
-                    st.success(f"✅ Audit completed for Site **{site_id_input}**!")
-                    st.markdown("### 📋 AI Audit Analysis Report")
-                    st.markdown(response.content[0].text)
+            if site_lat and site_lon:
+                st.info(f"📍 Target Site Coordinates: Lat {site_lat}, Lon {site_lon}")
+                
+                if user_lat is not None and user_lon is not None:
+                    distance = calculate_distance_km(user_lat, user_lon, site_lat, site_lon)
+                    
+                    if distance <= 3.0:
+                        is_location_valid = True
+                        st.success(f"✅ GPS Match Confirmed: You are **{distance:.2f} km** from the site (Within 3 km limit).")
+                    else:
+                        st.error(f"❌ Location Mismatch: You are **{distance:.2f} km** away from this site. Must be within **3 km**.")
+                else:
+                    st.warning("⚠️ GPS Signal Required: Please enable device location permissions.")
 
-                except anthropic.APIError as e:
-                    st.error(f"⚠️ Anthropic API Error: {str(e)}")
-                except Exception as e:
-                    st.error(f"⚠️ AI Vision Analysis failed: {str(e)}")
+    # Photo Upload Section
+    st.markdown("### PHOTOS")
+    uploaded_files = []
+
+    if not is_location_valid:
+        st.error("🔒 Photo upload and submission are locked. Select a site and confirm you are within 3 km.")
+    else:
+        input_mode = st.radio("Choose Input Method:", ["Camera", "Gallery"], horizontal=True)
+
+        if input_mode == "Camera":
+            img_file = st.camera_input("Capture Site Photo")
+            if img_file:
+                uploaded_files.append(img_file)
+        else:
+            img_files = st.file_uploader("Pick from gallery", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
+            if img_files:
+                uploaded_files.extend(img_files)
+
+        if uploaded_files:
+            st.write(f"Selected Photos ({len(uploaded_files)}):")
+            cols = st.columns(6)
+            for idx, file in enumerate(uploaded_files):
+                with cols[idx % 6]:
+                    st.image(file, width=120)
+
+    # Submission Action with Gemini 429 Retry Backoff
+    st.write("---")
+    if st.button("📤 Submit Site Audit to Supervisor", use_container_width=True, disabled=not is_location_valid):
+        if not uploaded_files:
+            st.warning("Please capture or upload at least one site photo.")
+        else:
+            gemini_key = st.secrets.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
+
+            if not gemini_key:
+                st.error("❌ Missing Gemini API Key! Configure `GEMINI_API_KEY` in Streamlit Secrets.")
+            else:
+                with st.spinner("🤖 Processing audit with AI and submitting directly..."):
+                    try:
+                        client = genai.Client(api_key=gemini_key)
+                        pil_images = [Image.open(f).convert("RGB") for f in uploaded_files]
+
+                        prompt = f"""
+                        You are an expert telecommunications site audit engineer inspecting field photos.
+                        Site ID: {selected_site_code}
+                        Technician: {tech_name_input or 'Unassigned'}
+
+                        Analyze the provided image(s) thoroughly and generate a structured site inspection report:
+                        1. **Equipment Identified**: Cabinets (Huawei/ETP48), Rectifiers, Antennas, RRUs, Microwave transmission dishes, Lithium/Lead-Acid Batteries, Solar installations.
+                        2. **Installation Quality & Cabling**: Cable routing neatness, grounding status, physical damage, cleanliness.
+                        3. **Defects & Safety Hazards**: Uncapped or exposed cables, water ingress signs, burnt connectors, loose mountings.
+                        4. **Final Verdict**: PASS, PASS WITH CONCERNS, or FAIL (Include justification and required corrective actions).
+                        """
+
+                        # Exponential retry mechanism for 429 rate limits
+                        max_retries = 3
+                        report_text = None
+
+                        for attempt in range(max_retries):
+                            try:
+                                response = client.models.generate_content(
+                                    model='gemini-3.6-flash',
+                                    contents=[prompt, *pil_images]
+                                )
+                                report_text = response.text
+                                break
+                            except APIError as api_err:
+                                if "429" in str(api_err) or "RESOURCE_EXHAUSTED" in str(api_err):
+                                    if attempt < max_retries - 1:
+                                        wait_sec = 15 * (attempt + 1)
+                                        st.warning(f"⏳ Rate limit reached. Retrying in {wait_sec} seconds (Attempt {attempt + 1}/{max_retries})...")
+                                        time.sleep(wait_sec)
+                                    else:
+                                        raise api_err
+                                else:
+                                    raise api_err
+
+                        if report_text:
+                            status_verdict = "PASS"
+                            if "FAIL" in report_text.upper():
+                                status_verdict = "FAIL"
+                            elif "CONCERNS" in report_text.upper():
+                                status_verdict = "PASS WITH CONCERNS"
+
+                            # Save to Supabase and dispatch email
+                            if save_report_to_supabase(selected_site_code, tech_name_input or 'Unassigned', status_verdict, report_text, user_lat, user_lon):
+                                st.success(f"✅ Audit report for Site **{selected_site_code}** successfully submitted to supervisor!")
+
+                    except APIError as e:
+                        if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+                            st.error("⏳ **API Quota Exceeded**: You've reached the Gemini Free Tier daily limit (20 requests/day). Switch to pay-as-you-go in Google AI Studio or try again later.")
+                        else:
+                            st.error(f"⚠️ Gemini API Error: {str(e)}")
+                    except Exception as e:
+                        st.error(f"⚠️ Audit submission failed: {str(e)}")
+
+# ---------------------------------------------------------
+# TAB 2: Admin Remote Dashboard
+# ---------------------------------------------------------
+if logged_user == "admin" and tab_reports is not None:
+    with tab_reports:
+        st.subheader("📊 Remote Site Audit Log (Supabase Database)")
+        
+        if st.button("🔄 Refresh Data"):
+            st.rerun()
+
+        df_reports = fetch_supabase_reports()
+
+        if not df_reports.empty:
+            st.dataframe(df_reports[['created_at', 'site_id', 'technician', 'coordinates', 'status', 'report_text']], use_container_width=True)
+            
+            # Excel Download Button
+            excel_data = convert_df_to_excel(df_reports[['created_at', 'site_id', 'technician', 'coordinates', 'status', 'report_text']])
+            
+            st.download_button(
+                label="📊 Download Audit History (Excel .xlsx)",
+                data=excel_data,
+                file_name="site_audit_reports.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+        else:
+            st.info("No remote records found in the database yet.")
