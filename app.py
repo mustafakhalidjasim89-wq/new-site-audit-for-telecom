@@ -1,8 +1,17 @@
+import sys
 import os
+
+# ---------------------------------------------------------
+# 0. Fix Import Paths for Streamlit Cloud Runtime
+# ---------------------------------------------------------
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+if BASE_DIR not in sys.path:
+    sys.path.append(BASE_DIR)
+
 import streamlit as st
 import pandas as pd
 
-# Import local utility modules
+# Local imports
 from kml_parser import parse_telecom_kml
 from geo_utils import find_nearby_sites
 
@@ -18,7 +27,6 @@ st.set_page_config(
 # ---------------------------------------------------------
 # 2. Path & Data Loading (Cached for performance)
 # ---------------------------------------------------------
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 KML_PATH = os.path.join(BASE_DIR, "data", "sites.kml")
 
 @st.cache_data
@@ -82,7 +90,6 @@ if search_input:
         radius_km = st.slider("Select search radius (km):", min_value=1.0, max_value=20.0, value=5.0, step=0.5)
 
         if site_info.get('latitude') and site_info.get('longitude'):
-            # Call your custom geo_utils function
             nearby_sites = find_nearby_sites(
                 lat=site_info['latitude'],
                 lon=site_info['longitude'],
@@ -102,7 +109,6 @@ if search_input:
                 st.map(map_df)
             else:
                 st.info(f"No nearby sites found within a {radius_km} km radius.")
-                # Show map of just the searched site
                 st.map(pd.DataFrame([site_info])[['latitude', 'longitude']])
         else:
             st.warning("Coordinates unavailable for this site code.")
