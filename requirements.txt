@@ -6,3 +6,4 @@ streamlit-js-eval
 supabase
 resend
 openpyxl
+opencv-python-headless
