@@ -3,50 +3,56 @@ import re
 
 def parse_telecom_kml(kml_path):
     """
-    Parses a KML file and extracts site codes, names, latitudes, longitudes, and altitudes.
-    Ensures that site names/codes are separated from numerical coordinates.
+    Parses a KML file, extracting site names while isolating coordinates.
+    If a Placemark <name> is a coordinate/number, it extracts the real Site ID 
+    from <description> or assigns a structured site code.
     """
     sites = []
-    
     try:
         tree = ET.parse(kml_path)
         root = tree.getroot()
         
-        # KML XML Namespaces
         namespaces = {'kml': 'http://www.opengis.net/kml/2.2'}
-        
-        # Find all Placemark elements
         placemarks = root.findall('.//kml:Placemark', namespaces)
         if not placemarks:
-            # Fallback if namespace isn't explicitly declared in elements
             placemarks = root.findall('.//Placemark')
 
-        for pm in placemarks:
-            # 1. Extract Placemark Name
-            name_elem = pm.find('kml:name', namespaces)
-            if name_elem is None:
-                name_elem = pm.find('name')
-                
-            raw_name = name_elem.text.strip() if name_elem is not None and name_elem.text else "UNKNOWN_SITE"
+        for idx, pm in enumerate(placemarks):
+            raw_name = ""
+            name_elem = pm.find('kml:name', namespaces) or pm.find('name')
+            
+            if name_elem is not None and name_elem.text:
+                raw_name = name_elem.text.strip()
 
-            # Filter out raw coordinates if the name itself is just a float/coordinate string
+            # Check if name is purely a floating-point coordinate (e.g. "40.9796")
+            is_coordinate = False
             try:
                 float(raw_name.replace(',', '').strip())
-                # If name is purely numeric, fallback placeholder
-                site_code = f"SITE-{len(sites)+1}"
+                is_coordinate = True
             except ValueError:
-                site_code = raw_name
+                is_coordinate = False
 
-            # 2. Extract Coordinates (<coordinates> lon,lat,alt </coordinates>)
-            coords_elem = pm.find('.//kml:coordinates', namespaces)
-            if coords_elem is None:
-                coords_elem = pm.find('.//coordinates')
+            site_code = raw_name
+            # If name is a coordinate number or empty, pull site ID from description
+            if is_coordinate or not raw_name:
+                desc_elem = pm.find('kml:description', namespaces) or pm.find('description')
+                if desc_elem is not None and desc_elem.text:
+                    desc_text = desc_elem.text
+                    # Extract alphanumeric site code pattern (e.g., BAG-CLS5-012, CLS-01)
+                    match = re.search(r'([A-Za-z0-9]+[\-_][A-Za-z0-9\-_]+)', desc_text)
+                    if match:
+                        site_code = match.group(1)
+                    else:
+                        site_code = f"SITE-{idx+1:03d}"
+                else:
+                    site_code = f"SITE-{idx+1:03d}"
 
+            # Extract Coordinates (<coordinates> lon,lat,alt </coordinates>)
+            coords_elem = pm.find('.//kml:coordinates', namespaces) or pm.find('.//coordinates')
             lat, lon, alt = None, None, 0.0
 
             if coords_elem is not None and coords_elem.text:
                 coords_str = coords_elem.text.strip()
-                # Split coordinate values (KML standard: lon, lat, alt)
                 parts = re.split(r'[\s,]+', coords_str)
                 parts = [p for p in parts if p]
                 
