@@ -1,55 +1,73 @@
 import xml.etree.ElementTree as ET
+import re
 
 def parse_telecom_kml(kml_path):
-    tree = ET.parse(kml_path)
-    root = tree.getroot()
-
+    """
+    Parses a KML file and extracts site codes, names, latitudes, longitudes, and altitudes.
+    Ensures that site names/codes are separated from numerical coordinates.
+    """
     sites = []
+    
+    try:
+        tree = ET.parse(kml_path)
+        root = tree.getroot()
+        
+        # KML XML Namespaces
+        namespaces = {'kml': 'http://www.opengis.net/kml/2.2'}
+        
+        # Find all Placemark elements
+        placemarks = root.findall('.//kml:Placemark', namespaces)
+        if not placemarks:
+            # Fallback if namespace isn't explicitly declared in elements
+            placemarks = root.findall('.//Placemark')
 
-    # Strip XML namespaces dynamically so any KML format works
-    for elem in root.iter():
-        if elem.tag.endswith('Placemark'):
-            name = ""
-            custom_code = ""
-            coords = ""
-
-            # Iterate over child elements in the Placemark
-            for child in elem.iter():
-                tag = child.tag.split('}')[-1]  # remove namespace prefix
+        for pm in placemarks:
+            # 1. Extract Placemark Name
+            name_elem = pm.find('kml:name', namespaces)
+            if name_elem is None:
+                name_elem = pm.find('name')
                 
-                if tag == 'name' and not name:
-                    name = child.text.strip() if child.text else ""
-                
-                # Check for custom tags like <mwm:customName> or fall back to name
-                if tag in ['customName', 'lang'] and child.text:
-                    custom_code = child.text.strip()
-                
-                if tag == 'coordinates':
-                    coords = child.text.strip() if child.text else ""
+            raw_name = name_elem.text.strip() if name_elem is not None and name_elem.text else "UNKNOWN_SITE"
 
-            # Fall back site_code to name if no custom code exists
-            if not custom_code:
-                custom_code = name
+            # Filter out raw coordinates if the name itself is just a float/coordinate string
+            try:
+                float(raw_name.replace(',', '').strip())
+                # If name is purely numeric, fallback placeholder
+                site_code = f"SITE-{len(sites)+1}"
+            except ValueError:
+                site_code = raw_name
 
-            # Parse longitude and latitude
-            lat, lon = None, None
-            if coords:
-                parts = coords.split()
-                first_coord = parts[0] if parts else coords
-                coord_split = first_coord.split(',')
-                if len(coord_split) >= 2:
+            # 2. Extract Coordinates (<coordinates> lon,lat,alt </coordinates>)
+            coords_elem = pm.find('.//kml:coordinates', namespaces)
+            if coords_elem is None:
+                coords_elem = pm.find('.//coordinates')
+
+            lat, lon, alt = None, None, 0.0
+
+            if coords_elem is not None and coords_elem.text:
+                coords_str = coords_elem.text.strip()
+                # Split coordinate values (KML standard: lon, lat, alt)
+                parts = re.split(r'[\s,]+', coords_str)
+                parts = [p for p in parts if p]
+                
+                if len(parts) >= 2:
                     try:
-                        lon = float(coord_split[0])
-                        lat = float(coord_split[1])
+                        lon = float(parts[0])
+                        lat = float(parts[1])
+                        if len(parts) >= 3:
+                            alt = float(parts[2])
                     except ValueError:
                         pass
 
-            if custom_code or (lat and lon):
+            if lat is not None and lon is not None:
                 sites.append({
-                    'site_code': custom_code,
-                    'name': name,
+                    'site_code': site_code,
                     'latitude': lat,
-                    'longitude': lon
+                    'longitude': lon,
+                    'altitude': alt
                 })
+
+    except Exception as e:
+        print(f"Error parsing KML: {e}")
 
     return sites
