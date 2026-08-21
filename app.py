@@ -2,6 +2,7 @@ import sys
 import os
 import io
 import time
+import re
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -33,6 +34,28 @@ if BASE_DIR not in sys.path:
 
 from kml_parser import parse_telecom_kml
 from geo_utils import find_nearby_sites
+
+# ---------------------------------------------------------
+# Helper: Extract Clean Site ID Only
+# ---------------------------------------------------------
+def get_clean_site_id(raw_str):
+    """
+    Strips out coordinates, extra spaces, tabs, and appended location data.
+    E.g., 'BAG-1234 (33.31, 44.36)' -> 'BAG-1234'
+          'BAG-1234 33.31 44.36 32m' -> 'BAG-1234'
+    """
+    if not raw_str or raw_str == "-- Select Site --":
+        return raw_str
+    
+    # 1. Convert to string and take the text before any comma or open parenthesis
+    clean = str(raw_str).split(',')[0].split('(')[0].split('\t')[0].strip()
+    
+    # 2. Extract first block/token if coordinates or numbers follow spaces
+    parts = clean.split()
+    if parts:
+        clean = parts[0]
+        
+    return clean.strip()
 
 # ---------------------------------------------------------
 # Helper: Barcode & Label Scanner
@@ -319,13 +342,14 @@ with tab_audit if logged_user == "admin" else st.container():
 
     with col_site:
         if not df_sites.empty and 'site_code' in df_sites.columns:
-            site_list = sorted(df_sites['site_code'].dropna().unique().tolist())
+            # Full raw options list retained for DataFrame lookup
+            raw_site_list = sorted(df_sites['site_code'].dropna().unique().tolist())
             
-            # Formats the dropdown list to show ONLY the Site ID / Code without appended coordinates/location text
+            # format_func dynamically applies get_clean_site_id to render ONLY the site code in the UI
             selected_site_code = st.selectbox(
                 "SELECT SITE ID",
-                options=["-- Select Site --"] + site_list,
-                format_func=lambda x: str(x).split(' ')[0].split(',')[0].split('(')[0].strip() if x != "-- Select Site --" else x
+                options=["-- Select Site --"] + raw_site_list,
+                format_func=get_clean_site_id
             )
         else:
             selected_site_code = st.selectbox("SELECT SITE ID", options=["-- No Sites Found --"])
@@ -387,7 +411,6 @@ with tab_audit if logged_user == "admin" else st.container():
 
             if img_file is not None:
                 img_bytes = img_file.getvalue()
-                # Store new captured photo if it isn't already saved
                 if not any(p.getvalue() == img_bytes for p in st.session_state["captured_photos"]):
                     st.session_state["captured_photos"].append(img_file)
 
@@ -410,6 +433,9 @@ with tab_audit if logged_user == "admin" else st.container():
             for idx, file in enumerate(uploaded_files):
                 with cols[idx % 6]:
                     st.image(file, width=120)
+
+    # Clean Site ID for submission display
+    display_site_id = get_clean_site_id(selected_site_code)
 
     # Submission Action with Gemini 429 Retry Backoff
     st.write("---")
@@ -440,7 +466,7 @@ with tab_audit if logged_user == "admin" else st.container():
                         # NGT Structured Inventory & Audit Prompt
                         prompt = f"""
 You are an expert telecommunications site audit engineer performing an NGT Equipment Asset & Quantity Inventory inspection.
-Site ID: {selected_site_code}
+Site ID: {display_site_id}
 Technician: {tech_name_input or 'Unassigned'}
 
 Auto-Scanned Barcodes/Asset Labels:
@@ -501,9 +527,9 @@ Analyze the provided image(s) thoroughly and generate a structured NGT site insp
                             st.subheader("📋 NGT Audit & Quantity Inventory Report")
                             st.markdown(report_text)
 
-                            # Save to Supabase and dispatch email
-                            if save_report_to_supabase(selected_site_code, tech_name_input or 'Unassigned', status_verdict, report_text, user_lat, user_lon):
-                                st.success(f"✅ NGT Audit report for Site **{selected_site_code}** successfully submitted to supervisor!")
+                            # Save to Supabase and dispatch email using clean Site ID
+                            if save_report_to_supabase(display_site_id, tech_name_input or 'Unassigned', status_verdict, report_text, user_lat, user_lon):
+                                st.success(f"✅ NGT Audit report for Site **{display_site_id}** successfully submitted to supervisor!")
                                 # Clear session photos after successful submission
                                 st.session_state["captured_photos"] = []
 
