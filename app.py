@@ -36,34 +36,30 @@ from kml_parser import parse_telecom_kml
 from geo_utils import find_nearby_sites
 
 # ---------------------------------------------------------
-# Helper: Extract Clean Site ID Only (Filters Out Coordinates)
+# Helper: Extract Pure Site Code Only
 # ---------------------------------------------------------
 def get_clean_site_id(raw_str):
     """
-    Strips out floating-point coordinate numbers (e.g. 40.9796, 39.01301)
-    and isolates alphanumeric Site Codes (e.g. BAG-CLS5-012).
+    Removes latitude, longitude, altitude, and pure float numbers from site string.
     """
-    if not raw_str or raw_str == "-- Select Site --":
+    if not raw_str or raw_str in ["-- Select Site --", "-- No Sites Found --"]:
         return raw_str
 
-    # Clean separators
-    sanitized = str(raw_str).replace(',', ' ').replace('(', ' ').replace(')', ' ').replace('\t', ' ')
-    tokens = sanitized.split()
+    clean = str(raw_str).replace(',', ' ').replace('(', ' ').replace(')', ' ').replace('\t', ' ')
+    tokens = clean.split()
 
-    # Filter out pure numbers and floating point coordinates
-    non_numeric_tokens = []
+    # Filter out pure numbers / floating point decimals
+    valid_tokens = []
     for token in tokens:
-        cleaned_token = token.strip()
         try:
-            float(cleaned_token)
-            # If it converts to float, skip it (it's a coordinate/altitude value)
+            float(token)
+            # Skip floating point numbers (coordinates/altitudes)
             continue
         except ValueError:
-            # If it cannot be converted to float, it's part of the alphanumeric Site Code/Name!
-            non_numeric_tokens.append(cleaned_token)
+            valid_tokens.append(token)
 
-    if non_numeric_tokens:
-        return " ".join(non_numeric_tokens)
+    if valid_tokens:
+        return " ".join(valid_tokens)
 
     return str(raw_str)
 
@@ -345,13 +341,15 @@ with tab_audit if logged_user == "admin" else st.container():
 
     with col_site:
         if not df_sites.empty and 'site_code' in df_sites.columns:
-            raw_site_list = sorted(df_sites['site_code'].dropna().unique().tolist())
+            # Clean and filter all site codes to ensure NO latitude/longitude numbers remain
+            cleaned_sites = [get_clean_site_id(s) for s in df_sites['site_code'].dropna().unique()]
             
-            # Formats display dynamically to show ONLY Site Code (filters out floats/coordinates)
+            # Remove any residual pure numbers or empty entries, then sort
+            final_site_list = sorted(list(set([s for s in cleaned_sites if s and not s.replace('.', '').isdigit()])))
+
             selected_site_code = st.selectbox(
                 "SELECT SITE ID",
-                options=["-- Select Site --"] + raw_site_list,
-                format_func=get_clean_site_id
+                options=["-- Select Site --"] + final_site_list
             )
         else:
             selected_site_code = st.selectbox("SELECT SITE ID", options=["-- No Sites Found --"])
@@ -373,7 +371,8 @@ with tab_audit if logged_user == "admin" else st.container():
     site_data = None
 
     if selected_site_code and selected_site_code != "-- Select Site --" and not df_sites.empty:
-        matched = df_sites[df_sites['site_code'] == selected_site_code]
+        # Match using cleaned site ID comparison
+        matched = df_sites[df_sites['site_code'].apply(get_clean_site_id) == selected_site_code]
         if not matched.empty:
             site_data = matched.iloc[0].to_dict()
             site_lat = site_data.get('latitude')
@@ -433,8 +432,6 @@ with tab_audit if logged_user == "admin" else st.container():
                 with cols[idx % 6]:
                     st.image(file, width=120)
 
-    display_site_id = get_clean_site_id(selected_site_code)
-
     st.write("---")
     if st.button("📤 Submit Site Audit & NGT Report", use_container_width=True, disabled=not is_location_valid):
         if not uploaded_files:
@@ -460,7 +457,7 @@ with tab_audit if logged_user == "admin" else st.container():
 
                         prompt = f"""
 You are an expert telecommunications site audit engineer performing an NGT Equipment Asset & Quantity Inventory inspection.
-Site ID: {display_site_id}
+Site ID: {selected_site_code}
 Technician: {tech_name_input or 'Unassigned'}
 
 Auto-Scanned Barcodes/Asset Labels:
@@ -519,8 +516,8 @@ Analyze the provided image(s) thoroughly and generate a structured NGT site insp
                             st.subheader("📋 NGT Audit & Quantity Inventory Report")
                             st.markdown(report_text)
 
-                            if save_report_to_supabase(display_site_id, tech_name_input or 'Unassigned', status_verdict, report_text, user_lat, user_lon):
-                                st.success(f"✅ NGT Audit report for Site **{display_site_id}** successfully submitted to supervisor!")
+                            if save_report_to_supabase(selected_site_code, tech_name_input or 'Unassigned', status_verdict, report_text, user_lat, user_lon):
+                                st.success(f"✅ NGT Audit report for Site **{selected_site_code}** successfully submitted to supervisor!")
                                 st.session_state["captured_photos"] = []
 
                     except APIError as e:
