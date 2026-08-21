@@ -319,8 +319,14 @@ with tab_audit if logged_user == "admin" else st.container():
 
     with col_site:
         if not df_sites.empty and 'site_code' in df_sites.columns:
-            site_list = sorted(df_sites['site_code'].unique().tolist())
-            selected_site_code = st.selectbox("SELECT SITE ID", options=["-- Select Site --"] + site_list)
+            site_list = sorted(df_sites['site_code'].dropna().unique().tolist())
+            
+            # Formats the dropdown list to show ONLY the Site ID / Code without appended coordinates/location text
+            selected_site_code = st.selectbox(
+                "SELECT SITE ID",
+                options=["-- Select Site --"] + site_list,
+                format_func=lambda x: str(x).split(' ')[0].split(',')[0].split('(')[0].strip() if x != "-- Select Site --" else x
+            )
         else:
             selected_site_code = st.selectbox("SELECT SITE ID", options=["-- No Sites Found --"])
 
