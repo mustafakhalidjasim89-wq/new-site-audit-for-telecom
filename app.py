@@ -365,6 +365,10 @@ with tab_audit if logged_user == "admin" else st.container():
 
     # Photo Upload Section
     st.markdown("### PHOTOS")
+
+    if "captured_photos" not in st.session_state:
+        st.session_state["captured_photos"] = []
+
     uploaded_files = []
 
     if not is_location_valid:
@@ -374,8 +378,21 @@ with tab_audit if logged_user == "admin" else st.container():
 
         if input_mode == "Camera":
             img_file = st.camera_input("Capture Site Photo")
-            if img_file:
-                uploaded_files.append(img_file)
+
+            if img_file is not None:
+                img_bytes = img_file.getvalue()
+                # Store new captured photo if it isn't already saved
+                if not any(p.getvalue() == img_bytes for p in st.session_state["captured_photos"]):
+                    st.session_state["captured_photos"].append(img_file)
+
+            col_clear, col_count = st.columns([1, 4])
+            with col_clear:
+                if st.button("🗑️ Clear Photos"):
+                    st.session_state["captured_photos"] = []
+                    st.rerun()
+
+            uploaded_files = st.session_state["captured_photos"]
+
         else:
             img_files = st.file_uploader("Pick from gallery", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
             if img_files:
@@ -481,6 +498,8 @@ Analyze the provided image(s) thoroughly and generate a structured NGT site insp
                             # Save to Supabase and dispatch email
                             if save_report_to_supabase(selected_site_code, tech_name_input or 'Unassigned', status_verdict, report_text, user_lat, user_lon):
                                 st.success(f"✅ NGT Audit report for Site **{selected_site_code}** successfully submitted to supervisor!")
+                                # Clear session photos after successful submission
+                                st.session_state["captured_photos"] = []
 
                     except APIError as e:
                         if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
