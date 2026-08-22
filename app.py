@@ -26,7 +26,7 @@ except ImportError:
     PYZBAR_AVAILABLE = False
 
 # ---------------------------------------------------------
-# 0. Fix Import Paths for Streamlit Cloud Runtime
+# 0. Fix Import Paths & Absolute Workspace Directory
 # ---------------------------------------------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 if BASE_DIR not in sys.path:
@@ -50,8 +50,6 @@ def get_clean_site_id(raw_str):
 
     valid_tokens = []
     for token in tokens:
-        # If token contains both letters and numbers/dots (e.g., BAG_1024), keep it
-        # If it's a floating point number representing lat/lon coordinates, skip it
         try:
             val = float(token)
             if 10.0 <= abs(val) <= 180.0 and '.' in token:
@@ -303,26 +301,26 @@ if st.sidebar.button("Log Out"):
     st.rerun()
 
 # ---------------------------------------------------------
-# 3. Flexible KML Dataset Loader
+# 3. Absolute Path KML Resolver with Cache Management
 # ---------------------------------------------------------
-KML_DIR = os.path.join(BASE_DIR, "data")
+KML_EXACT_PATH = os.path.join(BASE_DIR, "data", "sites.kml")
 
-@st.cache_data
-def load_kml_dataset(dir_path):
-    if not os.path.exists(dir_path):
-        return []
+@st.cache_data(ttl=60)
+def load_kml_dataset():
+    # 1. Direct match check
+    if os.path.exists(KML_EXACT_PATH):
+        return parse_telecom_kml(KML_EXACT_PATH)
     
-    # Automatically locate any file ending with .kml in data/
-    kml_files = [os.path.join(dir_path, f) for f in os.listdir(dir_path) if f.lower().endswith('.kml')]
-    if not kml_files:
-        return []
-        
-    try:
-        return parse_telecom_kml(kml_files[0])
-    except Exception:
-        return []
+    # 2. Fallback scan inside data/ directory for any .kml file
+    data_dir = os.path.join(BASE_DIR, "data")
+    if os.path.exists(data_dir):
+        files = [os.path.join(data_dir, f) for f in os.listdir(data_dir) if f.lower().endswith('.kml')]
+        if files:
+            return parse_telecom_kml(files[0])
+            
+    return []
 
-raw_sites = load_kml_dataset(KML_DIR)
+raw_sites = load_kml_dataset()
 df_sites = pd.DataFrame(raw_sites)
 
 # ---------------------------------------------------------
@@ -369,7 +367,7 @@ with tab_audit if logged_user == "admin" else st.container():
                 st.error("⚠️ Required site column not found in KML structure.")
                 selected_site_code = "-- No Sites Found --"
         else:
-            st.warning("⚠️ No .kml file found in `data/` directory or file is empty.")
+            st.warning("⚠️ sites.kml not found in data/ directory or file is empty.")
             selected_site_code = "-- No Sites Found --"
 
     with col_tech:
