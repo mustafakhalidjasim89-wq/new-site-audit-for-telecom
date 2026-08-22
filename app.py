@@ -36,34 +36,41 @@ from kml_parser import parse_telecom_kml
 from geo_utils import find_nearby_sites
 
 # ---------------------------------------------------------
-# Helper: Extract Clean Site ID Only
+# Helper: Extract Clean Site ID Only (Filters Out Coordinates)
 # ---------------------------------------------------------
 def get_clean_site_id(raw_str):
     """
-    Strips out coordinates, extra spaces, tabs, and appended location data.
-    E.g., 'BAG-1234 (33.31, 44.36)' -> 'BAG-1234'
-          'BAG-1234 33.31 44.36 32m' -> 'BAG-1234'
+    Strips out floating-point coordinate numbers (e.g. 40.9796, 39.01301)
+    and isolates alphanumeric Site Codes (e.g. BAG-CLS5-012).
     """
     if not raw_str or raw_str == "-- Select Site --":
         return raw_str
-    
-    # 1. Convert to string and take the text before any comma or open parenthesis
-    clean = str(raw_str).split(',')[0].split('(')[0].split('\t')[0].strip()
-    
-    # 2. Extract first block/token if coordinates or numbers follow spaces
-    parts = clean.split()
-    if parts:
-        clean = parts[0]
-        
-    return clean.strip()
+
+    # Clean separators
+    sanitized = str(raw_str).replace(',', ' ').replace('(', ' ').replace(')', ' ').replace('\t', ' ')
+    tokens = sanitized.split()
+
+    # Filter out pure numbers and floating point coordinates
+    non_numeric_tokens = []
+    for token in tokens:
+        cleaned_token = token.strip()
+        try:
+            float(cleaned_token)
+            # If it converts to float, skip it (it's a coordinate/altitude value)
+            continue
+        except ValueError:
+            # If it cannot be converted to float, it's part of the alphanumeric Site Code/Name!
+            non_numeric_tokens.append(cleaned_token)
+
+    if non_numeric_tokens:
+        return " ".join(non_numeric_tokens)
+
+    return str(raw_str)
 
 # ---------------------------------------------------------
 # Helper: Barcode & Label Scanner
 # ---------------------------------------------------------
 def scan_equipment_barcodes(uploaded_files):
-    """
-    Extracts 1D/2D Barcodes and Asset Tags from uploaded images using OpenCV & PyZBar.
-    """
     if not PYZBAR_AVAILABLE:
         return []
 
@@ -125,7 +132,6 @@ def send_email_notification(site_id, technician, status, report_text, user_lat, 
     </div>
     """
 
-    # Primary Method: Gmail SMTP Dispatch
     if sender_password and sender_password != "your-actual-asiacell-password":
         try:
             msg = MIMEMultipart("alternative")
@@ -143,7 +149,6 @@ def send_email_notification(site_id, technician, status, report_text, user_lat, 
         except Exception as e:
             st.warning(f"⚠️ Gmail SMTP dispatch failed ({str(e)}). Attempting Resend API...")
 
-    # Secondary Method: Resend API
     resend_key = st.secrets.get("RESEND_API_KEY") or os.environ.get("RESEND_API_KEY")
     if resend_key:
         try:
@@ -186,8 +191,6 @@ def save_report_to_supabase(site_id, technician, status, report_text, user_lat, 
             "report_text": report_text
         }
         supabase.table("audit_reports").insert(data).execute()
-        
-        # Trigger email notification
         send_email_notification(site_id, technician, status, report_text, user_lat, user_lon)
         return True
     except Exception as e:
@@ -342,10 +345,9 @@ with tab_audit if logged_user == "admin" else st.container():
 
     with col_site:
         if not df_sites.empty and 'site_code' in df_sites.columns:
-            # Full raw options list retained for DataFrame lookup
             raw_site_list = sorted(df_sites['site_code'].dropna().unique().tolist())
             
-            # format_func dynamically applies get_clean_site_id to render ONLY the site code in the UI
+            # Formats display dynamically to show ONLY Site Code (filters out floats/coordinates)
             selected_site_code = st.selectbox(
                 "SELECT SITE ID",
                 options=["-- Select Site --"] + raw_site_list,
@@ -357,7 +359,6 @@ with tab_audit if logged_user == "admin" else st.container():
     with col_tech:
         tech_name_input = st.text_input("TECHNICIAN NAME", placeholder="e.g. Alaa Fadel").strip()
 
-    # Fetch GPS Location
     loc = get_geolocation()
     user_lat, user_lon = None, None
 
@@ -368,7 +369,6 @@ with tab_audit if logged_user == "admin" else st.container():
     else:
         st.sidebar.warning("⚠️ GPS inactive. Please enable browser location permissions.")
 
-    # Geofence Check (3km Limit)
     is_location_valid = False
     site_data = None
 
@@ -393,7 +393,6 @@ with tab_audit if logged_user == "admin" else st.container():
                 else:
                     st.warning("⚠️ GPS Signal Required: Please enable device location permissions.")
 
-    # Photo Upload Section
     st.markdown("### PHOTOS")
 
     if "captured_photos" not in st.session_state:
@@ -434,10 +433,8 @@ with tab_audit if logged_user == "admin" else st.container():
                 with cols[idx % 6]:
                     st.image(file, width=120)
 
-    # Clean Site ID for submission display
     display_site_id = get_clean_site_id(selected_site_code)
 
-    # Submission Action with Gemini 429 Retry Backoff
     st.write("---")
     if st.button("📤 Submit Site Audit & NGT Report", use_container_width=True, disabled=not is_location_valid):
         if not uploaded_files:
@@ -450,7 +447,6 @@ with tab_audit if logged_user == "admin" else st.container():
             else:
                 with st.spinner("🏷️ Scanning Barcodes & Processing NGT Inventory with AI..."):
                     try:
-                        # 1. Automatic Barcode Scanning
                         barcodes_found = scan_equipment_barcodes(uploaded_files)
                         if barcodes_found:
                             st.markdown("#### 🏷️ Scanned Barcodes & Asset Labels")
@@ -459,11 +455,9 @@ with tab_audit if logged_user == "admin" else st.container():
                         else:
                             barcode_summary = "No machine-readable 1D/2D barcodes extracted by CV. Read human-printed labels directly from the photos."
 
-                        # 2. Setup Gemini AI Client
                         client = genai.Client(api_key=gemini_key)
                         pil_images = [Image.open(f).convert("RGB") for f in uploaded_files]
 
-                        # NGT Structured Inventory & Audit Prompt
                         prompt = f"""
 You are an expert telecommunications site audit engineer performing an NGT Equipment Asset & Quantity Inventory inspection.
 Site ID: {display_site_id}
@@ -493,7 +487,6 @@ Analyze the provided image(s) thoroughly and generate a structured NGT site insp
 
                         target_model = st.secrets.get("GEMINI_MODEL") or os.environ.get("GEMINI_MODEL") or "gemini-3.5-flash-lite"
 
-                        # Exponential retry mechanism for 429 rate limits
                         max_retries = 3
                         report_text = None
 
@@ -523,14 +516,11 @@ Analyze the provided image(s) thoroughly and generate a structured NGT site insp
                             elif "CONCERNS" in report_text.upper():
                                 status_verdict = "PASS WITH CONCERNS"
 
-                            # Display Report
                             st.subheader("📋 NGT Audit & Quantity Inventory Report")
                             st.markdown(report_text)
 
-                            # Save to Supabase and dispatch email using clean Site ID
                             if save_report_to_supabase(display_site_id, tech_name_input or 'Unassigned', status_verdict, report_text, user_lat, user_lon):
                                 st.success(f"✅ NGT Audit report for Site **{display_site_id}** successfully submitted to supervisor!")
-                                # Clear session photos after successful submission
                                 st.session_state["captured_photos"] = []
 
                     except APIError as e:
@@ -556,7 +546,6 @@ if logged_user == "admin" and tab_reports is not None:
         if not df_reports.empty:
             st.dataframe(df_reports[['created_at', 'site_id', 'technician', 'coordinates', 'status', 'report_text']], use_container_width=True)
             
-            # Excel Download Button
             excel_data = convert_df_to_excel(df_reports[['created_at', 'site_id', 'technician', 'coordinates', 'status', 'report_text']])
             
             st.download_button(
