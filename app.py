@@ -40,28 +40,31 @@ from geo_utils import find_nearby_sites
 # ---------------------------------------------------------
 def get_clean_site_id(raw_str):
     """
-    Removes latitude, longitude, altitude, and pure float numbers from site string.
+    Removes latitude, longitude, altitude coordinates while retaining valid site codes.
     """
-    if not raw_str or raw_str in ["-- Select Site --", "-- No Sites Found --"]:
-        return raw_str
+    if not raw_str or str(raw_str).strip() in ["-- Select Site --", "-- No Sites Found --"]:
+        return ""
 
-    clean = str(raw_str).replace(',', ' ').replace('(', ' ').replace(')', ' ').replace('\t', ' ')
+    clean = str(raw_str).replace(',', ' ').replace('(', ' ').replace(')', ' ').replace('\t', ' ').strip()
     tokens = clean.split()
 
-    # Filter out pure numbers / floating point decimals
     valid_tokens = []
     for token in tokens:
+        # If token contains both letters and numbers/dots (e.g., BAG_1024), keep it
+        # If it's a floating point number representing lat/lon coordinates, skip it
         try:
-            float(token)
-            # Skip floating point numbers (coordinates/altitudes)
-            continue
+            val = float(token)
+            # Skip if it looks like coordinates (e.g. 33.3152 or 44.3661)
+            if 10.0 <= abs(val) <= 180.0 and '.' in token:
+                continue
+            valid_tokens.append(token)
         except ValueError:
             valid_tokens.append(token)
 
     if valid_tokens:
         return " ".join(valid_tokens)
 
-    return str(raw_str)
+    return str(raw_str).strip()
 
 # ---------------------------------------------------------
 # Helper: Barcode & Label Scanner
@@ -340,19 +343,31 @@ with tab_audit if logged_user == "admin" else st.container():
     col_site, col_tech = st.columns(2)
 
     with col_site:
-        if not df_sites.empty and 'site_code' in df_sites.columns:
-            # Clean and filter all site codes to ensure NO latitude/longitude numbers remain
-            cleaned_sites = [get_clean_site_id(s) for s in df_sites['site_code'].dropna().unique()]
-            
-            # Remove any residual pure numbers or empty entries, then sort
-            final_site_list = sorted(list(set([s for s in cleaned_sites if s and not s.replace('.', '').isdigit()])))
+        if not df_sites.empty:
+            # Auto-detect target column name for site codes
+            possible_cols = ['site_code', 'site_id', 'name', 'Site_Code', 'SiteID', 'Name']
+            target_col = next((c for c in possible_cols if c in df_sites.columns), None)
 
-            selected_site_code = st.selectbox(
-                "SELECT SITE ID",
-                options=["-- Select Site --"] + final_site_list
-            )
+            if target_col:
+                # Extract and clean site codes without removing numeric IDs
+                raw_list = df_sites[target_col].dropna().astype(str).unique()
+                cleaned_sites = [get_clean_site_id(s) for s in raw_list if get_clean_site_id(s)]
+                final_site_list = sorted(list(set(cleaned_sites)))
+
+                if final_site_list:
+                    selected_site_code = st.selectbox(
+                        "SELECT SITE ID",
+                        options=["-- Select Site --"] + final_site_list
+                    )
+                else:
+                    st.error("⚠️ Failed to parse valid Site IDs from KML.")
+                    selected_site_code = "-- No Sites Found --"
+            else:
+                st.error("⚠️ Required site column not found in KML structure.")
+                selected_site_code = "-- No Sites Found --"
         else:
-            selected_site_code = st.selectbox("SELECT SITE ID", options=["-- No Sites Found --"])
+            st.warning("⚠️ `sites.kml` not found in `data/` directory or file is empty.")
+            selected_site_code = "-- No Sites Found --"
 
     with col_tech:
         tech_name_input = st.text_input("TECHNICIAN NAME", placeholder="e.g. Alaa Fadel").strip()
@@ -370,9 +385,9 @@ with tab_audit if logged_user == "admin" else st.container():
     is_location_valid = False
     site_data = None
 
-    if selected_site_code and selected_site_code != "-- Select Site --" and not df_sites.empty:
-        # Match using cleaned site ID comparison
-        matched = df_sites[df_sites['site_code'].apply(get_clean_site_id) == selected_site_code]
+    if selected_site_code and selected_site_code not in ["-- Select Site --", "-- No Sites Found --"] and not df_sites.empty:
+        # Match site row using target column
+        matched = df_sites[df_sites[target_col].astype(str).apply(get_clean_site_id) == selected_site_code]
         if not matched.empty:
             site_data = matched.iloc[0].to_dict()
             site_lat = site_data.get('latitude')
@@ -482,7 +497,7 @@ Analyze the provided image(s) thoroughly and generate a structured NGT site insp
    - PASS, PASS WITH CONCERNS, or FAIL (Include justification and required corrective actions).
                         """
 
-                        target_model = st.secrets.get("GEMINI_MODEL") or os.environ.get("GEMINI_MODEL") or "gemini-3.5-flash-lite"
+                        target_model = st.secrets.get("GEMINI_MODEL") or os.environ.get("GEMINI_MODEL") or "gemini-2.5-flash"
 
                         max_retries = 3
                         report_text = None
@@ -522,7 +537,7 @@ Analyze the provided image(s) thoroughly and generate a structured NGT site insp
 
                     except APIError as e:
                         if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                            st.error("⏳ **API Quota Exceeded**: You've reached the daily rate limit. Switch to pay-as-you-go or `gemini-3.5-flash-lite` in Secrets.")
+                            st.error("⏳ **API Quota Exceeded**: You've reached the daily rate limit. Switch to pay-as-you-go or `gemini-2.5-flash` in Secrets.")
                         else:
                             st.error(f"⚠️ Gemini API Error: {str(e)}")
                     except Exception as e:
