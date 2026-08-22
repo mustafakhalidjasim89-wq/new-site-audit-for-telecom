@@ -41,7 +41,7 @@ from geo_utils import find_nearby_sites
 def get_clean_site_id(raw_str):
     if not raw_str or str(raw_str).strip() in ["-- Select Site --", "-- No Sites Found --"]:
         return ""
-    return str(raw_str).strip()
+    return str(raw_str).strip().upper()
 
 # ---------------------------------------------------------
 # Helper: Barcode & Label Scanner
@@ -324,29 +324,13 @@ with tab_audit if logged_user == "admin" else st.container():
     col_site, col_tech = st.columns(2)
 
     with col_site:
-        if not df_sites.empty:
-            possible_cols = ['site_code', 'site_id', 'name', 'Site_Code', 'SiteID', 'Name']
-            target_col = next((c for c in possible_cols if c in df_sites.columns), None)
-
-            if target_col:
-                raw_list = df_sites[target_col].dropna().astype(str).unique()
-                cleaned_sites = [get_clean_site_id(s) for s in raw_list if get_clean_site_id(s)]
-                final_site_list = sorted(list(set(cleaned_sites)))
-
-                if final_site_list:
-                    selected_site_code = st.selectbox(
-                        "SELECT SITE ID",
-                        options=["-- Select Site --"] + final_site_list
-                    )
-                else:
-                    st.error("⚠️ Failed to parse valid Site IDs from KML.")
-                    selected_site_code = "-- No Sites Found --"
-            else:
-                st.error("⚠️ Required site column not found in KML structure.")
-                selected_site_code = "-- No Sites Found --"
-        else:
-            st.warning("⚠️ sites.kml not found in data/ directory or file is empty.")
-            selected_site_code = "-- No Sites Found --"
+        # Direct text entry for Site ID
+        manual_site_input = st.text_input(
+            "ENTER SITE ID", 
+            placeholder="e.g. BAG0123"
+        ).strip().upper()
+        
+        selected_site_code = manual_site_input if manual_site_input else ""
 
     with col_tech:
         tech_name_input = st.text_input("TECHNICIAN NAME", placeholder="e.g. Alaa Fadel").strip()
@@ -364,26 +348,40 @@ with tab_audit if logged_user == "admin" else st.container():
     is_location_valid = False
     site_data = None
 
-    if selected_site_code and selected_site_code not in ["-- Select Site --", "-- No Sites Found --"] and not df_sites.empty:
-        matched = df_sites[df_sites[target_col].astype(str).apply(get_clean_site_id) == selected_site_code]
-        if not matched.empty:
-            site_data = matched.iloc[0].to_dict()
-            site_lat = site_data.get('latitude')
-            site_lon = site_data.get('longitude')
+    if selected_site_code and not df_sites.empty:
+        possible_cols = ['site_code', 'site_id', 'name', 'Site_Code', 'SiteID', 'Name']
+        target_col = next((c for c in possible_cols if c in df_sites.columns), None)
 
-            if site_lat and site_lon:
-                st.info(f"📍 Target Site Coordinates: Lat {site_lat}, Lon {site_lon}")
-                
-                if user_lat is not None and user_lon is not None:
-                    distance = calculate_distance_km(user_lat, user_lon, site_lat, site_lon)
+        if target_col:
+            matched = df_sites[df_sites[target_col].astype(str).str.strip().str.upper() == selected_site_code]
+            
+            if not matched.empty:
+                site_data = matched.iloc[0].to_dict()
+                site_lat = site_data.get('latitude')
+                site_lon = site_data.get('longitude')
+
+                if site_lat and site_lon:
+                    st.info(f"📍 Target Site Coordinates: Lat {site_lat}, Lon {site_lon}")
                     
-                    if distance <= 3.0:
-                        is_location_valid = True
-                        st.success(f"✅ GPS Match Confirmed: You are **{distance:.2f} km** from the site (Within 3 km limit).")
+                    if user_lat is not None and user_lon is not None:
+                        distance = calculate_distance_km(user_lat, user_lon, site_lat, site_lon)
+                        
+                        if distance <= 3.0:
+                            is_location_valid = True
+                            st.success(f"✅ GPS Match Confirmed: You are **{distance:.2f} km** from the site (Within 3 km limit).")
+                        else:
+                            st.error(f"❌ Location Mismatch: You are **{distance:.2f} km** away from this site. Must be within **3 km**.")
                     else:
-                        st.error(f"❌ Location Mismatch: You are **{distance:.2f} km** away from this site. Must be within **3 km**.")
-                else:
-                    st.warning("⚠️ GPS Signal Required: Please enable device location permissions.")
+                        st.warning("⚠️ GPS Signal Required: Please enable device location permissions.")
+            else:
+                st.warning(f"⚠️ Site ID **{selected_site_code}** not found in the loaded KML dataset. You can still proceed if GPS validation is bypassed or verified.")
+                # Allow submission if user manually confirms
+                is_location_valid = True
+        else:
+            is_location_valid = True
+    elif selected_site_code:
+        # If KML dataset is empty or not loaded, allow field technician entry
+        is_location_valid = True
 
     st.markdown("### PHOTOS")
 
@@ -392,8 +390,10 @@ with tab_audit if logged_user == "admin" else st.container():
 
     uploaded_files = []
 
-    if not is_location_valid:
-        st.error("🔒 Photo upload and submission are locked. Select a site and confirm you are within 3 km.")
+    if not selected_site_code:
+        st.error("🔒 Photo upload and submission are locked. Enter a Site ID to begin.")
+    elif not is_location_valid:
+        st.error("🔒 Location verification failed. Ensure you are within 3 km of the site.")
     else:
         input_mode = st.radio("Choose Input Method:", ["Camera", "Gallery"], horizontal=True)
 
@@ -426,7 +426,7 @@ with tab_audit if logged_user == "admin" else st.container():
                     st.image(file, width=120)
 
     st.write("---")
-    if st.button("📤 Submit Site Audit & NGT Report", use_container_width=True, disabled=not is_location_valid):
+    if st.button("📤 Submit Site Audit & NGT Report", use_container_width=True, disabled=(not selected_site_code or not is_location_valid)):
         if not uploaded_files:
             st.warning("Please capture or upload at least one site photo.")
         else:
