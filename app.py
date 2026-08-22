@@ -496,7 +496,7 @@ Analyze the provided image(s) thoroughly and generate a structured NGT site insp
    - PASS, PASS WITH CONCERNS, or FAIL (Include justification and required corrective actions).
                         """
 
-                        target_model = st.secrets.get("GEMINI_MODEL") or os.environ.get("GEMINI_MODEL") or "gemini-2.5-flash"
+                        target_model = st.secrets.get("GEMINI_MODEL") or os.environ.get("GEMINI_MODEL") or "gemini-3.6-flash"
 
                         max_retries = 3
                         report_text = None
@@ -536,7 +536,7 @@ Analyze the provided image(s) thoroughly and generate a structured NGT site insp
 
                     except APIError as e:
                         if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                            st.error("⏳ **API Quota Exceeded**: You've reached the daily rate limit. Switch to pay-as-you-go or `gemini-2.5-flash` in Secrets.")
+                            st.error("⏳ **API Quota Exceeded**: You've reached the daily rate limit. Switch to pay-as-you-go or `gemini-3.6-flash` in Secrets.")
                         else:
                             st.error(f"⚠️ Gemini API Error: {str(e)}")
                     except Exception as e:
@@ -570,7 +570,7 @@ with tab_pm:
                     with st.spinner("🔬 Running PM Audit & Health Checks..."):
                         try:
                             client = genai.Client(api_key=gemini_key)
-                            target_model = st.secrets.get("GEMINI_MODEL") or os.environ.get("GEMINI_MODEL") or "gemini-2.5-flash"
+                            target_model = st.secrets.get("GEMINI_MODEL") or os.environ.get("GEMINI_MODEL") or "gemini-3.6-flash"
 
                             pm_prompt = f"""
 You are a senior telecommunications cluster supervisor conducting a Quality Audit on a Preventive Maintenance (PM) report.
