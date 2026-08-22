@@ -54,7 +54,6 @@ def get_clean_site_id(raw_str):
         # If it's a floating point number representing lat/lon coordinates, skip it
         try:
             val = float(token)
-            # Skip if it looks like coordinates (e.g. 33.3152 or 44.3661)
             if 10.0 <= abs(val) <= 180.0 and '.' in token:
                 continue
             valid_tokens.append(token)
@@ -304,20 +303,26 @@ if st.sidebar.button("Log Out"):
     st.rerun()
 
 # ---------------------------------------------------------
-# 3. KML Dataset Loader
+# 3. Flexible KML Dataset Loader
 # ---------------------------------------------------------
-KML_PATH = os.path.join(BASE_DIR, "data", "sites.kml")
+KML_DIR = os.path.join(BASE_DIR, "data")
 
 @st.cache_data
-def load_kml_dataset(path):
-    if not os.path.exists(path):
+def load_kml_dataset(dir_path):
+    if not os.path.exists(dir_path):
         return []
+    
+    # Automatically locate any file ending with .kml in data/
+    kml_files = [os.path.join(dir_path, f) for f in os.listdir(dir_path) if f.lower().endswith('.kml')]
+    if not kml_files:
+        return []
+        
     try:
-        return parse_telecom_kml(path)
+        return parse_telecom_kml(kml_files[0])
     except Exception:
         return []
 
-raw_sites = load_kml_dataset(KML_PATH)
+raw_sites = load_kml_dataset(KML_DIR)
 df_sites = pd.DataFrame(raw_sites)
 
 # ---------------------------------------------------------
@@ -344,12 +349,10 @@ with tab_audit if logged_user == "admin" else st.container():
 
     with col_site:
         if not df_sites.empty:
-            # Auto-detect target column name for site codes
             possible_cols = ['site_code', 'site_id', 'name', 'Site_Code', 'SiteID', 'Name']
             target_col = next((c for c in possible_cols if c in df_sites.columns), None)
 
             if target_col:
-                # Extract and clean site codes without removing numeric IDs
                 raw_list = df_sites[target_col].dropna().astype(str).unique()
                 cleaned_sites = [get_clean_site_id(s) for s in raw_list if get_clean_site_id(s)]
                 final_site_list = sorted(list(set(cleaned_sites)))
@@ -366,7 +369,7 @@ with tab_audit if logged_user == "admin" else st.container():
                 st.error("⚠️ Required site column not found in KML structure.")
                 selected_site_code = "-- No Sites Found --"
         else:
-            st.warning("⚠️ `sites.kml` not found in `data/` directory or file is empty.")
+            st.warning("⚠️ No .kml file found in `data/` directory or file is empty.")
             selected_site_code = "-- No Sites Found --"
 
     with col_tech:
@@ -386,7 +389,6 @@ with tab_audit if logged_user == "admin" else st.container():
     site_data = None
 
     if selected_site_code and selected_site_code not in ["-- Select Site --", "-- No Sites Found --"] and not df_sites.empty:
-        # Match site row using target column
         matched = df_sites[df_sites[target_col].astype(str).apply(get_clean_site_id) == selected_site_code]
         if not matched.empty:
             site_data = matched.iloc[0].to_dict()
