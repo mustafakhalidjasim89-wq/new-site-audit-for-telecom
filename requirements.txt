@@ -1,9 +1,11 @@
+pypdf
 streamlit
 pandas
+numpy
+opencv-python-headless
 pillow
+resend
 google-genai
 streamlit-js-eval
 supabase
-resend
 openpyxl
-opencv-python-headless
