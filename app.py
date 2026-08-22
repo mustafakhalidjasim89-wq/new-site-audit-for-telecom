@@ -387,13 +387,16 @@ with tab_audit:
                     st.info(f"📍 Target Site Coordinates: Lat {site_lat}, Lon {site_lon}")
                     
                     if user_lat is not None and user_lon is not None:
-                        distance = calculate_distance_km(user_lat, user_lon, site_lat, site_lon)
-                        
-                        if distance <= 3.0:
+                        distance_km = calculate_distance_km(user_lat, user_lon, site_lat, site_lon)
+                        distance_meters = int(distance_km * 1000)
+
+                        # Standardized 200m (0.2km) threshold
+                        if distance_km <= 0.2:
                             is_location_valid = True
-                            st.success(f"✅ GPS Match Confirmed: You are **{distance:.2f} km** from the site (Within 3 km limit).")
+                            st.success(f"✅ GPS Match Confirmed: You are **{distance_meters} meters** from the site (Within 200 m limit).")
                         else:
-                            st.error(f"❌ Location Mismatch: You are **{distance:.2f} km** away from this site. Must be within **3 km**.")
+                            dist_str = f"{distance_meters} meters" if distance_km < 1.0 else f"{distance_km:.2f} km"
+                            st.error(f"❌ Location Mismatch: You are **{dist_str}** away from this site. Must be within **200 meters**.")
                     else:
                         st.warning("⚠️ GPS Signal Required: Please enable device location permissions.")
             else:
@@ -414,7 +417,7 @@ with tab_audit:
     if not selected_site_code:
         st.error("🔒 Photo upload and submission are locked. Enter a Site ID to begin.")
     elif not is_location_valid:
-        st.error("🔒 Location verification failed. Ensure you are within 3 km of the site.")
+        st.error("🔒 Location verification failed. Ensure you are within 200 meters of the site.")
     else:
         input_mode = st.radio("Choose Input Method:", ["Camera", "Gallery"], horizontal=True)
 
