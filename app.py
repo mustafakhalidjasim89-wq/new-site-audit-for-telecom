@@ -17,6 +17,7 @@ from google import genai
 from google.genai.errors import APIError
 from streamlit_js_eval import get_geolocation
 from supabase import create_client, Client
+from pypdf import PdfReader
 
 # PyZBar for barcode/QR reading (fails gracefully if library is missing)
 try:
@@ -42,6 +43,22 @@ def get_clean_site_id(raw_str):
     if not raw_str or str(raw_str).strip() in ["-- Select Site --", "-- No Sites Found --"]:
         return ""
     return str(raw_str).strip().upper()
+
+# ---------------------------------------------------------
+# Helper: Extract Text from PDF Files
+# ---------------------------------------------------------
+def extract_text_from_pdf(pdf_file):
+    try:
+        reader = PdfReader(pdf_file)
+        text = ""
+        for page in reader.pages:
+            extracted = page.extract_text()
+            if extracted:
+                text += extracted + "\n"
+        return text
+    except Exception as e:
+        st.error(f"Error reading PDF file: {str(e)}")
+        return None
 
 # ---------------------------------------------------------
 # Helper: Barcode & Label Scanner
@@ -312,19 +329,25 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 if logged_user == "admin":
-    tab_audit, tab_reports = st.tabs(["🔍 Field Site Audit & NGT Scanner", "📊 Admin Remote Reports Dashboard"])
+    tab_audit, tab_pm, tab_reports = st.tabs([
+        "🔍 Field Site Audit & NGT Scanner", 
+        "📄 PM Report Analyzer (PDF)",
+        "📊 Admin Remote Reports Dashboard"
+    ])
 else:
-    tab_audit = st.container()
+    tab_audit, tab_pm = st.tabs([
+        "🔍 Field Site Audit & NGT Scanner", 
+        "📄 PM Report Analyzer (PDF)"
+    ])
     tab_reports = None
 
 # ---------------------------------------------------------
 # TAB 1: Field Site Audit
 # ---------------------------------------------------------
-with tab_audit if logged_user == "admin" else st.container():
+with tab_audit:
     col_site, col_tech = st.columns(2)
 
     with col_site:
-        # Direct text entry for Site ID
         manual_site_input = st.text_input(
             "ENTER SITE ID", 
             placeholder="e.g. BAG0123"
@@ -375,12 +398,10 @@ with tab_audit if logged_user == "admin" else st.container():
                         st.warning("⚠️ GPS Signal Required: Please enable device location permissions.")
             else:
                 st.warning(f"⚠️ Site ID **{selected_site_code}** not found in the loaded KML dataset. You can still proceed if GPS validation is bypassed or verified.")
-                # Allow submission if user manually confirms
                 is_location_valid = True
         else:
             is_location_valid = True
     elif selected_site_code:
-        # If KML dataset is empty or not loaded, allow field technician entry
         is_location_valid = True
 
     st.markdown("### PHOTOS")
@@ -522,7 +543,80 @@ Analyze the provided image(s) thoroughly and generate a structured NGT site insp
                         st.error(f"⚠️ Audit submission failed: {str(e)}")
 
 # ---------------------------------------------------------
-# TAB 2: Admin Remote Dashboard
+# TAB 2: PM Report Analyzer (PDF)
+# ---------------------------------------------------------
+with tab_pm:
+    st.subheader("📄 Automated Preventive Maintenance (PM) PDF Audit")
+    st.markdown("Upload vendor or subcontractor PM checksheets (PDF) to perform AI metric extraction and validation.")
+
+    uploaded_pdf = st.file_uploader("Upload PM Report (PDF)", type=["pdf"])
+
+    if uploaded_pdf is not None:
+        with st.spinner("📖 Extracting text from PM document..."):
+            extracted_pm_text = extract_text_from_pdf(uploaded_pdf)
+
+        if extracted_pm_text:
+            st.success(f"Successfully extracted {len(extracted_pm_text)} characters from **{uploaded_pdf.name}**.")
+            
+            with st.expander("👁️ View Extracted Document Text"):
+                st.text_area("PDF Content", extracted_pm_text, height=200)
+
+            if st.button("🤖 Analyze PM Report with AI", use_container_width=True):
+                gemini_key = st.secrets.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
+
+                if not gemini_key:
+                    st.error("❌ Missing Gemini API Key! Configure `GEMINI_API_KEY` in Streamlit Secrets.")
+                else:
+                    with st.spinner("🔬 Running PM Audit & Health Checks..."):
+                        try:
+                            client = genai.Client(api_key=gemini_key)
+                            target_model = st.secrets.get("GEMINI_MODEL") or os.environ.get("GEMINI_MODEL") or "gemini-2.5-flash"
+
+                            pm_prompt = f"""
+You are a senior telecommunications cluster supervisor conducting a Quality Audit on a Preventive Maintenance (PM) report.
+
+Review the following PM Report text carefully and generate a structured technical evaluation:
+
+1. **SITE IDENTIFICATION & DATES**:
+   - Site Code / Name
+   - Maintenance Date & Maintenance Team / Vendor Name
+
+2. **POWER & ENVIRONMENT METRICS CHECK**:
+   - Commercial Power / Grid status & AC Voltage levels.
+   - Rectifier DC Output Voltage (-48V DC nominal check), Rectifier module load current.
+   - Generator Operating Hours, Oil Level, Fuel Level, Battery Voltage.
+   - Air Conditioner operational status and room ambient temperature.
+
+3. **RAN & TRANSMISSION HEALTH**:
+   - Antenna alignment / Tilt check status.
+   - Fiber / Feeder cable inspection and VSWR check status.
+   - Microwave Link alignment, RSL (Received Signal Level) values, ODU status.
+
+4. **MAINTENANCE DEFECTS & MISSING ITEMS**:
+   - Highlight any failed inspection items, missing parameters, or improper maintenance work.
+
+5. **SUPERVISOR AUDIT VERDICT**:
+   - **APPROVED**, **APPROVED WITH ACTION ITEMS**, or **REJECTED**.
+   - List required corrective actions if any defects are identified.
+
+---
+PM REPORT DOCUMENT TEXT:
+{extracted_pm_text}
+                            """
+
+                            response = client.models.generate_content(
+                                model=target_model,
+                                contents=[pm_prompt]
+                            )
+
+                            st.markdown("### 📊 AI Preventive Maintenance Analysis Report")
+                            st.markdown(response.text)
+
+                        except Exception as e:
+                            st.error(f"⚠️ PM Analysis failed: {str(e)}")
+
+# ---------------------------------------------------------
+# TAB 3: Admin Remote Dashboard
 # ---------------------------------------------------------
 if logged_user == "admin" and tab_reports is not None:
     with tab_reports:
