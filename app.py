@@ -26,7 +26,7 @@ except ImportError:
     PYZBAR_AVAILABLE = False
 
 # ---------------------------------------------------------
-# 0. Fix Import Paths for Streamlit Cloud Runtime
+# 0. Fix Import Paths & Absolute Workspace Directory
 # ---------------------------------------------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 if BASE_DIR not in sys.path:
@@ -36,36 +36,12 @@ from kml_parser import parse_telecom_kml
 from geo_utils import find_nearby_sites
 
 # ---------------------------------------------------------
-# Helper: Extract Clean Site ID Only (Filters Out Coordinates)
+# Helper: Extract Pure Site Code Only
 # ---------------------------------------------------------
 def get_clean_site_id(raw_str):
-    """
-    Strips out floating-point coordinate numbers (e.g. 40.9796, 39.01301)
-    and isolates alphanumeric Site Codes (e.g. BAG-CLS5-012).
-    """
-    if not raw_str or raw_str == "-- Select Site --":
-        return raw_str
-
-    # Clean separators
-    sanitized = str(raw_str).replace(',', ' ').replace('(', ' ').replace(')', ' ').replace('\t', ' ')
-    tokens = sanitized.split()
-
-    # Filter out pure numbers and floating point coordinates
-    non_numeric_tokens = []
-    for token in tokens:
-        cleaned_token = token.strip()
-        try:
-            float(cleaned_token)
-            # If it converts to float, skip it (it's a coordinate/altitude value)
-            continue
-        except ValueError:
-            # If it cannot be converted to float, it's part of the alphanumeric Site Code/Name!
-            non_numeric_tokens.append(cleaned_token)
-
-    if non_numeric_tokens:
-        return " ".join(non_numeric_tokens)
-
-    return str(raw_str)
+    if not raw_str or str(raw_str).strip() in ["-- Select Site --", "-- No Sites Found --"]:
+        return ""
+    return str(raw_str).strip()
 
 # ---------------------------------------------------------
 # Helper: Barcode & Label Scanner
@@ -305,20 +281,24 @@ if st.sidebar.button("Log Out"):
     st.rerun()
 
 # ---------------------------------------------------------
-# 3. KML Dataset Loader
+# 3. Absolute Path KML Resolver
 # ---------------------------------------------------------
-KML_PATH = os.path.join(BASE_DIR, "data", "sites.kml")
+KML_EXACT_PATH = os.path.join(BASE_DIR, "data", "sites.kml")
 
-@st.cache_data
-def load_kml_dataset(path):
-    if not os.path.exists(path):
-        return []
-    try:
-        return parse_telecom_kml(path)
-    except Exception:
-        return []
+@st.cache_data(ttl=60)
+def load_kml_dataset():
+    if os.path.exists(KML_EXACT_PATH):
+        return parse_telecom_kml(KML_EXACT_PATH)
+    
+    data_dir = os.path.join(BASE_DIR, "data")
+    if os.path.exists(data_dir):
+        files = [os.path.join(data_dir, f) for f in os.listdir(data_dir) if f.lower().endswith('.kml')]
+        if files:
+            return parse_telecom_kml(files[0])
+            
+    return []
 
-raw_sites = load_kml_dataset(KML_PATH)
+raw_sites = load_kml_dataset()
 df_sites = pd.DataFrame(raw_sites)
 
 # ---------------------------------------------------------
@@ -344,17 +324,29 @@ with tab_audit if logged_user == "admin" else st.container():
     col_site, col_tech = st.columns(2)
 
     with col_site:
-        if not df_sites.empty and 'site_code' in df_sites.columns:
-            raw_site_list = sorted(df_sites['site_code'].dropna().unique().tolist())
-            
-            # Formats display dynamically to show ONLY Site Code (filters out floats/coordinates)
-            selected_site_code = st.selectbox(
-                "SELECT SITE ID",
-                options=["-- Select Site --"] + raw_site_list,
-                format_func=get_clean_site_id
-            )
+        if not df_sites.empty:
+            possible_cols = ['site_code', 'site_id', 'name', 'Site_Code', 'SiteID', 'Name']
+            target_col = next((c for c in possible_cols if c in df_sites.columns), None)
+
+            if target_col:
+                raw_list = df_sites[target_col].dropna().astype(str).unique()
+                cleaned_sites = [get_clean_site_id(s) for s in raw_list if get_clean_site_id(s)]
+                final_site_list = sorted(list(set(cleaned_sites)))
+
+                if final_site_list:
+                    selected_site_code = st.selectbox(
+                        "SELECT SITE ID",
+                        options=["-- Select Site --"] + final_site_list
+                    )
+                else:
+                    st.error("⚠️ Failed to parse valid Site IDs from KML.")
+                    selected_site_code = "-- No Sites Found --"
+            else:
+                st.error("⚠️ Required site column not found in KML structure.")
+                selected_site_code = "-- No Sites Found --"
         else:
-            selected_site_code = st.selectbox("SELECT SITE ID", options=["-- No Sites Found --"])
+            st.warning("⚠️ sites.kml not found in data/ directory or file is empty.")
+            selected_site_code = "-- No Sites Found --"
 
     with col_tech:
         tech_name_input = st.text_input("TECHNICIAN NAME", placeholder="e.g. Alaa Fadel").strip()
@@ -372,8 +364,8 @@ with tab_audit if logged_user == "admin" else st.container():
     is_location_valid = False
     site_data = None
 
-    if selected_site_code and selected_site_code != "-- Select Site --" and not df_sites.empty:
-        matched = df_sites[df_sites['site_code'] == selected_site_code]
+    if selected_site_code and selected_site_code not in ["-- Select Site --", "-- No Sites Found --"] and not df_sites.empty:
+        matched = df_sites[df_sites[target_col].astype(str).apply(get_clean_site_id) == selected_site_code]
         if not matched.empty:
             site_data = matched.iloc[0].to_dict()
             site_lat = site_data.get('latitude')
@@ -433,8 +425,6 @@ with tab_audit if logged_user == "admin" else st.container():
                 with cols[idx % 6]:
                     st.image(file, width=120)
 
-    display_site_id = get_clean_site_id(selected_site_code)
-
     st.write("---")
     if st.button("📤 Submit Site Audit & NGT Report", use_container_width=True, disabled=not is_location_valid):
         if not uploaded_files:
@@ -460,7 +450,7 @@ with tab_audit if logged_user == "admin" else st.container():
 
                         prompt = f"""
 You are an expert telecommunications site audit engineer performing an NGT Equipment Asset & Quantity Inventory inspection.
-Site ID: {display_site_id}
+Site ID: {selected_site_code}
 Technician: {tech_name_input or 'Unassigned'}
 
 Auto-Scanned Barcodes/Asset Labels:
@@ -485,7 +475,7 @@ Analyze the provided image(s) thoroughly and generate a structured NGT site insp
    - PASS, PASS WITH CONCERNS, or FAIL (Include justification and required corrective actions).
                         """
 
-                        target_model = st.secrets.get("GEMINI_MODEL") or os.environ.get("GEMINI_MODEL") or "gemini-3.5-flash-lite"
+                        target_model = st.secrets.get("GEMINI_MODEL") or os.environ.get("GEMINI_MODEL") or "gemini-2.5-flash"
 
                         max_retries = 3
                         report_text = None
@@ -519,13 +509,13 @@ Analyze the provided image(s) thoroughly and generate a structured NGT site insp
                             st.subheader("📋 NGT Audit & Quantity Inventory Report")
                             st.markdown(report_text)
 
-                            if save_report_to_supabase(display_site_id, tech_name_input or 'Unassigned', status_verdict, report_text, user_lat, user_lon):
-                                st.success(f"✅ NGT Audit report for Site **{display_site_id}** successfully submitted to supervisor!")
+                            if save_report_to_supabase(selected_site_code, tech_name_input or 'Unassigned', status_verdict, report_text, user_lat, user_lon):
+                                st.success(f"✅ NGT Audit report for Site **{selected_site_code}** successfully submitted to supervisor!")
                                 st.session_state["captured_photos"] = []
 
                     except APIError as e:
                         if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                            st.error("⏳ **API Quota Exceeded**: You've reached the daily rate limit. Switch to pay-as-you-go or `gemini-3.5-flash-lite` in Secrets.")
+                            st.error("⏳ **API Quota Exceeded**: You've reached the daily rate limit. Switch to pay-as-you-go or `gemini-2.5-flash` in Secrets.")
                         else:
                             st.error(f"⚠️ Gemini API Error: {str(e)}")
                     except Exception as e:
