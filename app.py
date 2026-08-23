@@ -242,6 +242,43 @@ def calculate_distance_km(lat1, lon1, lat2, lon2):
         return float('inf')
 
 # ---------------------------------------------------------
+# Helper: Robust Gemini Generation with Fallback Models
+# ---------------------------------------------------------
+def generate_gemini_content_robust(client, contents, config):
+    configured_model = st.secrets.get("GEMINI_MODEL") or os.environ.get("GEMINI_MODEL")
+    candidate_models = []
+    if configured_model:
+        candidate_models.append(configured_model)
+    
+    # Priority list of fallback models
+    candidate_models.extend(["gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-pro"])
+    
+    # Remove duplicates while preserving order
+    seen = set()
+    models_to_try = [m for m in candidate_models if not (m in seen or seen.add(m))]
+
+    last_error = None
+    for model_name in models_to_try:
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=contents,
+                config=config
+            )
+            return response.text
+        except APIError as api_err:
+            last_error = api_err
+            # If 404 model not found, try the next model in candidate list
+            if "404" in str(api_err) or "NOT_FOUND" in str(api_err):
+                continue
+            elif "429" in str(api_err) or "RESOURCE_EXHAUSTED" in str(api_err):
+                time.sleep(5)
+                continue
+            else:
+                raise api_err
+    raise last_error
+
+# ---------------------------------------------------------
 # 1. Page Config & Custom Dark UI Styling
 # ---------------------------------------------------------
 st.set_page_config(
@@ -491,7 +528,6 @@ with tab_audit:
 
                         client = genai.Client(api_key=gemini_key)
                         
-                        # Compress and optimize photos to prevent API delays/timeouts
                         pil_images = [optimize_image(f) for f in uploaded_files]
 
                         SYSTEM_PROMPT = """
@@ -533,37 +569,17 @@ Please analyze the attached site photo(s) with high precision and generate the s
 ### 4. FINAL VERDICT & DEFECTS
 """
 
-                        target_model = st.secrets.get("GEMINI_MODEL") or os.environ.get("GEMINI_MODEL") or "gemini-2.5-flash"
-
-                        # Set temperature=0.0 for deterministic, reliable, high-precision detection
                         gen_config = types.GenerateContentConfig(
                             system_instruction=SYSTEM_PROMPT,
                             temperature=0.0,
                             top_p=0.95
                         )
 
-                        max_retries = 3
-                        report_text = None
-
-                        for attempt in range(max_retries):
-                            try:
-                                response = client.models.generate_content(
-                                    model=target_model,
-                                    contents=[user_prompt, *pil_images],
-                                    config=gen_config
-                                )
-                                report_text = response.text
-                                break
-                            except APIError as api_err:
-                                if "429" in str(api_err) or "RESOURCE_EXHAUSTED" in str(api_err):
-                                    if attempt < max_retries - 1:
-                                        wait_sec = 15 * (attempt + 1)
-                                        st.warning(f"⏳ Rate limit reached. Retrying in {wait_sec} seconds (Attempt {attempt + 1}/{max_retries})...")
-                                        time.sleep(wait_sec)
-                                    else:
-                                        raise api_err
-                                else:
-                                    raise api_err
+                        report_text = generate_gemini_content_robust(
+                            client=client,
+                            contents=[user_prompt, *pil_images],
+                            config=gen_config
+                        )
 
                         if report_text:
                             status_verdict = "PASS"
@@ -580,10 +596,7 @@ Please analyze the attached site photo(s) with high precision and generate the s
                                 st.session_state["captured_photos"] = []
 
                     except APIError as e:
-                        if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                            st.error("⏳ **API Quota Exceeded**: You've reached the daily rate limit. Switch to pay-as-you-go or `gemini-2.5-flash` in Secrets.")
-                        else:
-                            st.error(f"⚠️ Gemini API Error: {str(e)}")
+                        st.error(f"⚠️ Gemini API Error: {str(e)}")
                     except Exception as e:
                         st.error(f"⚠️ Audit submission failed: {str(e)}")
 
@@ -615,7 +628,6 @@ with tab_pm:
                     with st.spinner("🔬 Running PM Audit & Health Checks..."):
                         try:
                             client = genai.Client(api_key=gemini_key)
-                            target_model = st.secrets.get("GEMINI_MODEL") or os.environ.get("GEMINI_MODEL") or "gemini-2.5-flash"
 
                             pm_prompt = f"""
 You are a senior telecommunications cluster supervisor conducting a Quality Audit on a Preventive Maintenance (PM) report.
@@ -649,13 +661,16 @@ PM REPORT DOCUMENT TEXT:
 {extracted_pm_text}
                             """
 
-                            response = client.models.generate_content(
-                                model=target_model,
-                                contents=[pm_prompt]
+                            gen_config = types.GenerateContentConfig(temperature=0.0)
+
+                            pm_report_result = generate_gemini_content_robust(
+                                client=client,
+                                contents=[pm_prompt],
+                                config=gen_config
                             )
 
                             st.markdown("### 📊 AI Preventive Maintenance Analysis Report")
-                            st.markdown(response.text)
+                            st.markdown(pm_report_result)
 
                         except Exception as e:
                             st.error(f"⚠️ PM Analysis failed: {str(e)}")
