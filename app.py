@@ -242,7 +242,7 @@ def calculate_distance_km(lat1, lon1, lat2, lon2):
         return float('inf')
 
 # ---------------------------------------------------------
-# Helper: Robust Gemini Generation with Verified Models
+# Helper: Robust Gemini Generation with Active Latest Models
 # ---------------------------------------------------------
 def generate_gemini_content_robust(client, contents, config):
     configured_model = st.secrets.get("GEMINI_MODEL") or os.environ.get("GEMINI_MODEL")
@@ -251,8 +251,8 @@ def generate_gemini_content_robust(client, contents, config):
     if configured_model:
         candidate_models.append(configured_model)
     
-    # Supported model names in Google GenAI SDK v1beta / v1
-    candidate_models.extend(["gemini-2.5-flash", "gemini-2.0-flash"])
+    # Active latest models
+    candidate_models.extend(["gemini-3.6-flash", "gemini-2.5-flash"])
     
     # Remove duplicates while preserving order
     seen = set()
