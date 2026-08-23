@@ -14,6 +14,7 @@ from PIL import Image
 from math import radians, cos, sin, asin, sqrt
 import resend
 from google import genai
+from google.genai import types
 from google.genai.errors import APIError
 from streamlit_js_eval import get_geolocation
 from supabase import create_client, Client
@@ -35,6 +36,21 @@ if BASE_DIR not in sys.path:
 
 from kml_parser import parse_telecom_kml
 from geo_utils import find_nearby_sites
+
+# ---------------------------------------------------------
+# Helper: Image Optimization to Prevent Timeouts
+# ---------------------------------------------------------
+def optimize_image(uploaded_file, max_size=(1024, 1024)):
+    """Resize and compress image to lower network upload time."""
+    img = Image.open(uploaded_file)
+    if img.mode != 'RGB':
+        img = img.convert('RGB')
+    img.thumbnail(max_size)
+    
+    buffer = io.BytesIO()
+    img.save(buffer, format="JPEG", quality=80)
+    buffer.seek(0)
+    return Image.open(buffer)
 
 # ---------------------------------------------------------
 # Helper: Extract Pure Site Code Only
@@ -102,7 +118,7 @@ def send_email_notification(site_id, technician, status, report_text, user_lat, 
 
     html_body = f"""
     <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 8px;">
-        <h2 style="color: #0284c7; margin-bottom: 5px;">📡 NGT Telecom Site Audit Report</h2>
+        <h2 style="color: #0284c7; margin-bottom: 5px;">📡 NTG Telecom Site Audit Report</h2>
         <hr style="border: 0; border-top: 1px solid #eee;">
         
         <table style="width: 100%; margin-top: 15px; font-size: 14px;">
@@ -114,7 +130,7 @@ def send_email_notification(site_id, technician, status, report_text, user_lat, 
 
         <hr style="border: 0; border-top: 1px solid #eee; margin: 20px 0;">
 
-        <h3 style="color: #333;">🤖 NGT Equipment Inventory & Inspection Findings</h3>
+        <h3 style="color: #333;">🤖 NTG Equipment Inventory & Inspection Findings</h3>
         <div style="background-color: #f8fafc; padding: 15px; border-left: 4px solid #0284c7; border-radius: 4px; white-space: pre-wrap; font-size: 13px; line-height: 1.6;">
 {report_text}
         </div>
@@ -323,20 +339,20 @@ df_sites = pd.DataFrame(raw_sites)
 # ---------------------------------------------------------
 st.markdown("""
     <div class='header-card'>
-        <h2 style='color: #00d2ff; margin:0;'>📡 Telecom Site Audit AI (NGT Inventory)</h2>
+        <h2 style='color: #00d2ff; margin:0;'>📡 Telecom Site Audit AI (NTG Inventory)</h2>
         <p style='color: #8e9aaf; margin:4px 0 0 0;'>Designed by Mustafa Khalid / Supervisor / R3-BAG-CLS5</p>
     </div>
 """, unsafe_allow_html=True)
 
 if logged_user == "admin":
     tab_audit, tab_pm, tab_reports = st.tabs([
-        "🔍 Field Site Audit & NGT Scanner", 
+        "🔍 Field Site Audit & NTG Scanner", 
         "📄 PM Report Analyzer (PDF)",
         "📊 Admin Remote Reports Dashboard"
     ])
 else:
     tab_audit, tab_pm = st.tabs([
-        "🔍 Field Site Audit & NGT Scanner", 
+        "🔍 Field Site Audit & NTG Scanner", 
         "📄 PM Report Analyzer (PDF)"
     ])
     tab_reports = None
@@ -390,7 +406,6 @@ with tab_audit:
                         distance_km = calculate_distance_km(user_lat, user_lon, site_lat, site_lon)
                         distance_meters = int(distance_km * 1000)
 
-                        # Standardized 200m (0.2km) threshold
                         if distance_km <= 0.2:
                             is_location_valid = True
                             st.success(f"✅ GPS Match Confirmed: You are **{distance_meters} meters** from the site (Within 200 m limit).")
@@ -450,7 +465,7 @@ with tab_audit:
                     st.image(file, width=120)
 
     st.write("---")
-    if st.button("📤 Submit Site Audit & NGT Report", use_container_width=True, disabled=(not selected_site_code or not is_location_valid)):
+    if st.button("📤 Submit Site Audit & NTG Report", use_container_width=True, disabled=(not selected_site_code or not is_location_valid)):
         if not uploaded_files:
             st.warning("Please capture or upload at least one site photo.")
         else:
@@ -459,7 +474,7 @@ with tab_audit:
             if not gemini_key:
                 st.error("❌ Missing Gemini API Key! Configure `GEMINI_API_KEY` in Streamlit Secrets.")
             else:
-                with st.spinner("🏷️ Scanning Barcodes & Processing NGT Inventory with AI..."):
+                with st.spinner("🏷️ Scanning Barcodes & Processing NTG Inventory with AI..."):
                     try:
                         barcodes_found = scan_equipment_barcodes(uploaded_files)
                         if barcodes_found:
@@ -470,36 +485,57 @@ with tab_audit:
                             barcode_summary = "No machine-readable 1D/2D barcodes extracted by CV. Read human-printed labels directly from the photos."
 
                         client = genai.Client(api_key=gemini_key)
-                        pil_images = [Image.open(f).convert("RGB") for f in uploaded_files]
+                        
+                        # Compress and optimize photos to prevent API delays/timeouts
+                        pil_images = [optimize_image(f) for f in uploaded_files]
 
-                        prompt = f"""
-You are an expert telecommunications site audit engineer performing an NGT Equipment Asset & Quantity Inventory inspection.
+                        SYSTEM_PROMPT = """
+You are an expert telecom site audit engineer performing an NTG Equipment Asset & Quantity Inventory inspection.
+
+CRITICAL ACRONYM MANDATE:
+- Always use the acronym "NTG" in all titles, sections, and text. NEVER write "NGT".
+
+MANDATORY INSPECTION & DEFECT DETECTION RULES:
+1. HOUSEKEEPING & FOREIGN OBJECT AUDIT:
+   - Carefully inspect the TOP SURFACE (roof/top panel) and immediate surrounding area of all enclosures and cabinets.
+   - You MUST explicitly look for foreign objects such as water bottles, food items, liquid containers, trash, or unanchored loose tools.
+   - If ANY foreign object (especially liquids or water bottles) is detected on or near equipment, flag it prominently under "FINAL VERDICT & DEFECTS" and set the verdict to "PASS WITH CONCERNS" or "FAIL".
+
+2. EQUIPMENT QUANTITY COUNT & AUDIT:
+   - Antennas: Count RF sector antennas and microwave dishes.
+   - Batteries: Count lithium battery packs and lead-acid battery strings.
+   - Power Systems: Count active cabinets and rectifiers.
+   - RAN / Transmission: Count BBUs, pRRU/RHUBs, RRUs, and RTN microwave ODUs.
+
+3. BARCODE & LABEL VERIFICATION:
+   - Cross-reference visible barcode tags and printed labels against detected equipment.
+
+4. CABLING & PHYSICAL INTEGRITY:
+   - Cable routing, neatness, grounding wires, physical condition.
+"""
+
+                        user_prompt = f"""
 Site ID: {selected_site_code}
 Technician: {tech_name_input or 'Unassigned'}
 
 Auto-Scanned Barcodes/Asset Labels:
 {barcode_summary}
 
-Analyze the provided image(s) thoroughly and generate a structured NGT site inspection and equipment count report:
+Please analyze the attached site photo(s) and generate the structured inspection report using these headings:
+### 1. NTG EQUIPMENT QUANTITY COUNT & AUDIT
+### 2. BARCODE & LABEL VERIFICATION
+### 3. INSTALLATION QUALITY & CABLING
+### 4. FINAL VERDICT & DEFECTS
+"""
 
-1. **NGT EQUIPMENT QUANTITY COUNT & AUDIT**:
-   - **Antennas**: Count RF sector antennas and microwave transmission dishes (note brand/type if visible).
-   - **Batteries**: Count total lithium battery packs and lead-acid battery strings.
-   - **Power Systems**: Count active Huawei ETP48/rectifier cabinets and rectifier modules.
-   - **RAN / Transmission Equipment**: Count active RRUs/RRHs, BBU units, and RTN microwave ODUs.
+                        target_model = st.secrets.get("GEMINI_MODEL") or os.environ.get("GEMINI_MODEL") or "gemini-2.5-flash"
 
-2. **BARCODE & LABEL VERIFICATION**:
-   - Cross-reference visible barcode tags and printed labels against the detected equipment.
-   - List any unreadable, damaged, or missing asset barcode labels.
-
-3. **INSTALLATION QUALITY & CABLING**:
-   - Cable routing neatness, grounding connections, physical integrity, cleanliness.
-
-4. **FINAL VERDICT & DEFECTS**:
-   - PASS, PASS WITH CONCERNS, or FAIL (Include justification and required corrective actions).
-                        """
-
-                        target_model = st.secrets.get("GEMINI_MODEL") or os.environ.get("GEMINI_MODEL") or "gemini-3.6-flash"
+                        # Set low temperature for precise and reliable object detection
+                        gen_config = types.GenerateContentConfig(
+                            system_instruction=SYSTEM_PROMPT,
+                            temperature=0.0,
+                            top_p=0.95
+                        )
 
                         max_retries = 3
                         report_text = None
@@ -508,7 +544,8 @@ Analyze the provided image(s) thoroughly and generate a structured NGT site insp
                             try:
                                 response = client.models.generate_content(
                                     model=target_model,
-                                    contents=[prompt, *pil_images]
+                                    contents=[user_prompt, *pil_images],
+                                    config=gen_config
                                 )
                                 report_text = response.text
                                 break
@@ -530,16 +567,16 @@ Analyze the provided image(s) thoroughly and generate a structured NGT site insp
                             elif "CONCERNS" in report_text.upper():
                                 status_verdict = "PASS WITH CONCERNS"
 
-                            st.subheader("📋 NGT Audit & Quantity Inventory Report")
+                            st.subheader("📋 NTG Audit & Quantity Inventory Report")
                             st.markdown(report_text)
 
                             if save_report_to_supabase(selected_site_code, tech_name_input or 'Unassigned', status_verdict, report_text, user_lat, user_lon):
-                                st.success(f"✅ NGT Audit report for Site **{selected_site_code}** successfully submitted to supervisor!")
+                                st.success(f"✅ NTG Audit report for Site **{selected_site_code}** successfully submitted to supervisor!")
                                 st.session_state["captured_photos"] = []
 
                     except APIError as e:
                         if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                            st.error("⏳ **API Quota Exceeded**: You've reached the daily rate limit. Switch to pay-as-you-go or `gemini-3.6-flash` in Secrets.")
+                            st.error("⏳ **API Quota Exceeded**: You've reached the daily rate limit. Switch to pay-as-you-go or `gemini-2.5-flash` in Secrets.")
                         else:
                             st.error(f"⚠️ Gemini API Error: {str(e)}")
                     except Exception as e:
@@ -573,7 +610,7 @@ with tab_pm:
                     with st.spinner("🔬 Running PM Audit & Health Checks..."):
                         try:
                             client = genai.Client(api_key=gemini_key)
-                            target_model = st.secrets.get("GEMINI_MODEL") or os.environ.get("GEMINI_MODEL") or "gemini-3.6-flash"
+                            target_model = st.secrets.get("GEMINI_MODEL") or os.environ.get("GEMINI_MODEL") or "gemini-2.5-flash"
 
                             pm_prompt = f"""
 You are a senior telecommunications cluster supervisor conducting a Quality Audit on a Preventive Maintenance (PM) report.
