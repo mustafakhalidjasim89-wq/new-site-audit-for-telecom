@@ -539,12 +539,14 @@ CRITICAL DEFINITION OF NTG:
 - Refer to hardware by its actual brand/type (e.g., Huawei RHUB, BlueStorm Cabinet, ODF, Battery Rack) and evaluate its NTG asset tagging status.
 
 MANDATORY OUTPUT FORMAT:
-You MUST follow this EXACT layout for every report. Do NOT change table headers or list styles. Ensure Section 1 is always a Markdown Table.
+You MUST follow this EXACT layout for every report. Do NOT change table headers or list styles. Ensure Section 1 is always a Markdown Table followed by individual photo breakdowns.
 
 ### 1. EQUIPMENT QUANTITY COUNT & AUDIT
 | Equipment / Asset Description | Identified Model / Brand | Quantities Detected | Status / Location |
 | :--- | :--- | :--- | :--- |
 (Fill rows here)
+
+(Add Photo-by-Photo Breakdown bullet points directly below the table)
 
 ### 2. NTG ASSET TAGGING & BARCODE VERIFICATION
 * **Equipment Identifiers:** (Describe NTG tagging, ASIACELL tags, branding, or barcodes on the hardware enclosures).
@@ -565,11 +567,15 @@ You MUST follow this EXACT layout for every report. Do NOT change table headers 
                         user_prompt = f"""
 Site ID: {selected_site_code}
 Technician: {tech_name_input or 'Unassigned'}
+Total Photos Attached: {len(pil_images)}
 
 Auto-Scanned Barcodes/Asset Labels:
 {barcode_summary}
 
-Please analyze the attached site photo(s) with high precision and generate the structured inspection report based on the strict layout format defined in your instructions.
+IMPORTANT MULTI-PHOTO INSTRUCTIONS:
+1. Examine each of the {len(pil_images)} uploaded photos step-by-step.
+2. Determine if the photos depict multiple distinct physical racks or different angles/views of the SAME rack. Deduplicate physical asset counts in Section 1.
+3. In Section 1, list total unique physical assets detected across all photos, and add bullet points detailing what is shown in Photo #1, Photo #2, and Photo #3.
 """
 
                         gen_config = types.GenerateContentConfig(
