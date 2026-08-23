@@ -118,7 +118,7 @@ def send_email_notification(site_id, technician, status, report_text, user_lat, 
 
     html_body = f"""
     <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 8px;">
-        <h2 style="color: #0284c7; margin-bottom: 5px;">📡 NTG Telecom Site Audit Report</h2>
+        <h2 style="color: #0284c7; margin-bottom: 5px;">📡 Telecom Site Audit & NTG Tagging Report</h2>
         <hr style="border: 0; border-top: 1px solid #eee;">
         
         <table style="width: 100%; margin-top: 15px; font-size: 14px;">
@@ -130,7 +130,7 @@ def send_email_notification(site_id, technician, status, report_text, user_lat, 
 
         <hr style="border: 0; border-top: 1px solid #eee; margin: 20px 0;">
 
-        <h3 style="color: #333;">🤖 NTG Equipment Inventory & Inspection Findings</h3>
+        <h3 style="color: #333;">🤖 Equipment Inventory & NTG Tagging Findings</h3>
         <div style="background-color: #f8fafc; padding: 15px; border-left: 4px solid #0284c7; border-radius: 4px; white-space: pre-wrap; font-size: 13px; line-height: 1.6;">
 {report_text}
         </div>
@@ -376,20 +376,20 @@ df_sites = pd.DataFrame(raw_sites)
 # ---------------------------------------------------------
 st.markdown("""
     <div class='header-card'>
-        <h2 style='color: #00d2ff; margin:0;'>📡 Telecom Site Audit AI (NTG Inventory)</h2>
+        <h2 style='color: #00d2ff; margin:0;'>📡 Telecom Site Audit AI (NTG Tagging)</h2>
         <p style='color: #8e9aaf; margin:4px 0 0 0;'>Designed by Mustafa Khalid / Supervisor / R3-BAG-CLS5</p>
     </div>
 """, unsafe_allow_html=True)
 
 if logged_user == "admin":
     tab_audit, tab_pm, tab_reports = st.tabs([
-        "🔍 Field Site Audit & NTG Scanner", 
+        "🔍 Field Site Audit & NTG Tagging", 
         "📄 PM Report Analyzer (PDF)",
         "📊 Admin Remote Reports Dashboard"
     ])
 else:
     tab_audit, tab_pm = st.tabs([
-        "🔍 Field Site Audit & NTG Scanner", 
+        "🔍 Field Site Audit & NTG Tagging", 
         "📄 PM Report Analyzer (PDF)"
     ])
     tab_reports = None
@@ -516,7 +516,7 @@ with tab_audit:
             if not gemini_key:
                 st.error("❌ Missing Gemini API Key! Configure `GEMINI_API_KEY` in Streamlit Secrets.")
             else:
-                with st.spinner("🏷️ Scanning Barcodes & Processing NTG Inventory with High-Precision AI..."):
+                with st.spinner("🏷️ Analyzing Equipment & NTG Tagging Data..."):
                     try:
                         barcodes_found = scan_equipment_barcodes(uploaded_files)
                         if barcodes_found:
@@ -524,35 +524,42 @@ with tab_audit:
                             st.dataframe(pd.DataFrame(barcodes_found), use_container_width=True)
                             barcode_summary = "\n".join([f"- [{b['Photo']}] ({b['Type']}) Serial: {b['Barcode / Serial']}" for b in barcodes_found])
                         else:
-                            barcode_summary = "No machine-readable 1D/2D barcodes extracted by CV. Read human-printed labels directly from the photos."
+                            barcode_summary = "No machine-readable 1D/2D barcodes extracted by CV. Read human-printed NTG tags and labels directly from the photos."
 
                         client = genai.Client(api_key=gemini_key)
                         
                         pil_images = [optimize_image(f) for f in uploaded_files]
 
                         SYSTEM_PROMPT = """
-You are a highly precise and strict telecom site audit engineer performing an NTG Equipment Asset, Quantity Inventory, & Housekeeping Inspection.
+You are a highly precise telecom site audit engineer performing a physical site inspection and NTG Asset Tagging Audit.
 
-CRITICAL ACRONYM MANDATE:
-- Always use the acronym "NTG" in all titles, sections, and text. NEVER write "NGT".
+CRITICAL DEFINITION OF NTG:
+- "NTG" refers strictly to the National Tagging system (asset labels, barcode tags, port wrap labels, and site identification plates) applied onto equipment.
+- NEVER refer to physical hardware, cabinets, BBU, or RHUB units as "NTG equipment" or "NTG cabinets".
+- Refer to hardware by its actual brand/type (e.g., Huawei RHUB, BlueStorm Cabinet, ODF, Battery Rack) and evaluate its NTG asset tagging status.
 
-MANDATORY HIGH-PRECISION INSPECTION & DEFECT DETECTION RULES:
-1. HOUSEKEEPING & FOREIGN OBJECT AUDIT (EXTREMELY STRICT):
-   - Thoroughly inspect the TOP SURFACE (roof/top panel) and immediate surrounding areas of all telecom enclosures, battery racks, and cabinets.
-   - You MUST explicitly look for foreign objects such as water bottles, plastic cups, drink containers, food trash, unanchored tools, or loose debris.
-   - If ANY foreign object (especially liquids or water bottles) is detected on top of or near equipment, flag it prominently under "FINAL VERDICT & DEFECTS" and mark the verdict as "PASS WITH CONCERNS" or "FAIL".
+MANDATORY OUTPUT FORMAT:
+You MUST follow this EXACT layout for every report. Do NOT change table headers or list styles. Ensure Section 1 is always a Markdown Table.
 
-2. EQUIPMENT QUANTITY COUNT & AUDIT:
-   - Antennas: Count RF sector antennas and microwave dishes precisely.
-   - Batteries: Count lithium battery packs and lead-acid battery strings.
-   - Power Systems: Count active cabinets and rectifiers.
-   - RAN / Transmission: Count BBUs, pRRU/RHUBs, RRUs, and RTN microwave ODUs.
+### 1. EQUIPMENT QUANTITY COUNT & AUDIT
+| Equipment / Asset Description | Identified Model / Brand | Quantities Detected | Status / Location |
+| :--- | :--- | :--- | :--- |
+(Fill rows here)
 
-3. BARCODE & LABEL VERIFICATION:
-   - Cross-reference visible barcode tags and printed labels against detected equipment.
+### 2. NTG ASSET TAGGING & BARCODE VERIFICATION
+* **Equipment Identifiers:** (Describe NTG tagging, ASIACELL tags, branding, or barcodes on the hardware enclosures).
+* **Cable & Port Labels:** (Describe port tags, e.g., PRRU, RHUB wrapped NTG labels).
+* **Barcode / QR Status:** (State if any 1D/2D barcodes are visible).
 
-4. CABLING & PHYSICAL INTEGRITY:
-   - Cable routing, neatness, grounding wires, physical condition.
+### 3. INSTALLATION QUALITY & CABLING
+* **Mounting & Physical Integrity:** (Describe how hardware is mounted and secured).
+* **Cable Routing & Management:** (Describe fiber jumpers, pRRU cables, slack loops).
+* **Grounding:** (Describe earth connections if visible).
+
+### 4. FINAL VERDICT & DEFECTS
+* **Final Verdict:** [PASS / PASS WITH CONCERNS / FAIL]
+* **Identified Defects (Including Housekeeping):** (Thoroughly inspect the TOP SURFACE of all telecom enclosures. Look for water bottles, plastic cups, food trash, or unanchored items. If ANY foreign object/liquid is on top of or near hardware, it is a FAIL).
+* **Mandatory Corrective Actions:** (List precise instructions to fix defects).
 """
 
                         user_prompt = f"""
@@ -562,11 +569,7 @@ Technician: {tech_name_input or 'Unassigned'}
 Auto-Scanned Barcodes/Asset Labels:
 {barcode_summary}
 
-Please analyze the attached site photo(s) with high precision and generate the structured inspection report using these headings:
-### 1. NTG EQUIPMENT QUANTITY COUNT & AUDIT
-### 2. BARCODE & LABEL VERIFICATION
-### 3. INSTALLATION QUALITY & CABLING
-### 4. FINAL VERDICT & DEFECTS
+Please analyze the attached site photo(s) with high precision and generate the structured inspection report based on the strict layout format defined in your instructions.
 """
 
                         gen_config = types.GenerateContentConfig(
@@ -588,11 +591,11 @@ Please analyze the attached site photo(s) with high precision and generate the s
                             elif "CONCERNS" in report_text.upper():
                                 status_verdict = "PASS WITH CONCERNS"
 
-                            st.subheader("📋 NTG Audit & Quantity Inventory Report")
+                            st.subheader("📋 Equipment Audit & NTG Tagging Report")
                             st.markdown(report_text)
 
                             if save_report_to_supabase(selected_site_code, tech_name_input or 'Unassigned', status_verdict, report_text, user_lat, user_lon):
-                                st.success(f"✅ NTG Audit report for Site **{selected_site_code}** successfully submitted to supervisor!")
+                                st.success(f"✅ Audit report for Site **{selected_site_code}** successfully submitted to supervisor!")
                                 st.session_state["captured_photos"] = []
 
                     except APIError as e:
