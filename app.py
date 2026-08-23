@@ -242,16 +242,17 @@ def calculate_distance_km(lat1, lon1, lat2, lon2):
         return float('inf')
 
 # ---------------------------------------------------------
-# Helper: Robust Gemini Generation with Fallback Models
+# Helper: Robust Gemini Generation with Verified Models
 # ---------------------------------------------------------
 def generate_gemini_content_robust(client, contents, config):
     configured_model = st.secrets.get("GEMINI_MODEL") or os.environ.get("GEMINI_MODEL")
     candidate_models = []
+    
     if configured_model:
         candidate_models.append(configured_model)
     
-    # Priority list of fallback models
-    candidate_models.extend(["gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-pro"])
+    # Supported model names in Google GenAI SDK v1beta / v1
+    candidate_models.extend(["gemini-2.5-flash", "gemini-2.0-flash"])
     
     # Remove duplicates while preserving order
     seen = set()
@@ -268,7 +269,6 @@ def generate_gemini_content_robust(client, contents, config):
             return response.text
         except APIError as api_err:
             last_error = api_err
-            # If 404 model not found, try the next model in candidate list
             if "404" in str(api_err) or "NOT_FOUND" in str(api_err):
                 continue
             elif "429" in str(api_err) or "RESOURCE_EXHAUSTED" in str(api_err):
