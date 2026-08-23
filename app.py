@@ -366,7 +366,7 @@ with tab_audit:
     with col_site:
         manual_site_input = st.text_input(
             "ENTER SITE ID", 
-            placeholder="e.g. BAG0123"
+            placeholder="e.g. BAG0123 or BAG0000"
         ).strip().upper()
         
         selected_site_code = manual_site_input if manual_site_input else ""
@@ -387,7 +387,12 @@ with tab_audit:
     is_location_valid = False
     site_data = None
 
-    if selected_site_code and not df_sites.empty:
+    # ---- JOKER SITE CHECK (BAG0000) ----
+    if selected_site_code == "BAG0000":
+        is_location_valid = True
+        st.success("🃏 **Joker Test Site Activated (BAG0000)**: GPS validation distance check bypassed. You can audit from any location!")
+
+    elif selected_site_code and not df_sites.empty:
         possible_cols = ['site_code', 'site_id', 'name', 'Site_Code', 'SiteID', 'Name']
         target_col = next((c for c in possible_cols if c in df_sites.columns), None)
 
@@ -415,7 +420,7 @@ with tab_audit:
                     else:
                         st.warning("⚠️ GPS Signal Required: Please enable device location permissions.")
             else:
-                st.warning(f"⚠️ Site ID **{selected_site_code}** not found in the loaded KML dataset. You can still proceed if GPS validation is bypassed or verified.")
+                st.warning(f"⚠️ Site ID **{selected_site_code}** not found in the loaded KML dataset. Proceeding as unmapped site.")
                 is_location_valid = True
         else:
             is_location_valid = True
@@ -474,7 +479,7 @@ with tab_audit:
             if not gemini_key:
                 st.error("❌ Missing Gemini API Key! Configure `GEMINI_API_KEY` in Streamlit Secrets.")
             else:
-                with st.spinner("🏷️ Scanning Barcodes & Processing NTG Inventory with AI..."):
+                with st.spinner("🏷️ Scanning Barcodes & Processing NTG Inventory with High-Precision AI..."):
                     try:
                         barcodes_found = scan_equipment_barcodes(uploaded_files)
                         if barcodes_found:
@@ -490,19 +495,19 @@ with tab_audit:
                         pil_images = [optimize_image(f) for f in uploaded_files]
 
                         SYSTEM_PROMPT = """
-You are an expert telecom site audit engineer performing an NTG Equipment Asset & Quantity Inventory inspection.
+You are a highly precise and strict telecom site audit engineer performing an NTG Equipment Asset, Quantity Inventory, & Housekeeping Inspection.
 
 CRITICAL ACRONYM MANDATE:
 - Always use the acronym "NTG" in all titles, sections, and text. NEVER write "NGT".
 
-MANDATORY INSPECTION & DEFECT DETECTION RULES:
-1. HOUSEKEEPING & FOREIGN OBJECT AUDIT:
-   - Carefully inspect the TOP SURFACE (roof/top panel) and immediate surrounding area of all enclosures and cabinets.
-   - You MUST explicitly look for foreign objects such as water bottles, food items, liquid containers, trash, or unanchored loose tools.
-   - If ANY foreign object (especially liquids or water bottles) is detected on or near equipment, flag it prominently under "FINAL VERDICT & DEFECTS" and set the verdict to "PASS WITH CONCERNS" or "FAIL".
+MANDATORY HIGH-PRECISION INSPECTION & DEFECT DETECTION RULES:
+1. HOUSEKEEPING & FOREIGN OBJECT AUDIT (EXTREMELY STRICT):
+   - Thoroughly inspect the TOP SURFACE (roof/top panel) and immediate surrounding areas of all telecom enclosures, battery racks, and cabinets.
+   - You MUST explicitly look for foreign objects such as water bottles, plastic cups, drink containers, food trash, unanchored tools, or loose debris.
+   - If ANY foreign object (especially liquids or water bottles) is detected on top of or near equipment, flag it prominently under "FINAL VERDICT & DEFECTS" and mark the verdict as "PASS WITH CONCERNS" or "FAIL".
 
 2. EQUIPMENT QUANTITY COUNT & AUDIT:
-   - Antennas: Count RF sector antennas and microwave dishes.
+   - Antennas: Count RF sector antennas and microwave dishes precisely.
    - Batteries: Count lithium battery packs and lead-acid battery strings.
    - Power Systems: Count active cabinets and rectifiers.
    - RAN / Transmission: Count BBUs, pRRU/RHUBs, RRUs, and RTN microwave ODUs.
@@ -521,7 +526,7 @@ Technician: {tech_name_input or 'Unassigned'}
 Auto-Scanned Barcodes/Asset Labels:
 {barcode_summary}
 
-Please analyze the attached site photo(s) and generate the structured inspection report using these headings:
+Please analyze the attached site photo(s) with high precision and generate the structured inspection report using these headings:
 ### 1. NTG EQUIPMENT QUANTITY COUNT & AUDIT
 ### 2. BARCODE & LABEL VERIFICATION
 ### 3. INSTALLATION QUALITY & CABLING
@@ -530,7 +535,7 @@ Please analyze the attached site photo(s) and generate the structured inspection
 
                         target_model = st.secrets.get("GEMINI_MODEL") or os.environ.get("GEMINI_MODEL") or "gemini-2.5-flash"
 
-                        # Set low temperature for precise and reliable object detection
+                        # Set temperature=0.0 for deterministic, reliable, high-precision detection
                         gen_config = types.GenerateContentConfig(
                             system_instruction=SYSTEM_PROMPT,
                             temperature=0.0,
