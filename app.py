@@ -471,17 +471,31 @@ with tab_pm:
                 all_site_data = []
 
                 BATCH_SYSTEM_PROMPT = """
-You are a telecom supervisor auditing PM reports and uploaded checksheet photos. Extract key details strictly in valid JSON format without extra text:
+You are a senior telecom audit supervisor analyzing PM checksheets and attached site photos. 
+Examine ALL provided text and image pages carefully to extract accurate technical audit details.
+
+CRITICAL INSTRUCTIONS FOR ACCURACY:
+1. SITE DEFECTS & REMARKS:
+   - Identify specific physical defects mentioned in text or visible in photos (e.g., loose cabling, unanchored equipment, trash/leaves on site, high DG running hours, oil leaks, active alarms, missing lock).
+   - DO NOT write generic responses like "Failed site" or "High DG 1". State the EXACT issue (e.g., "High DG running hours (over limit)", "Oil leak detected on DG", "Trash/leaves found inside compound").
+
+2. MANDATORY EQUIPMENT & PHOTO AUDIT:
+   - Check presence and photo clarity for all core assets: Diesel Generator (DG), Power Cabinet/Rectifiers, Battery Banks, Microwave Units, and Solar/Hybrid controllers.
+   - If an asset is reported in text but lacks a clear dedicated photo, explicitly list it under `missing_equipment_photos`.
+
+3. SUPERVISOR FOCUS NOTES:
+   - Provide concrete, actionable steps for the field technician (e.g., "Remove leaves and clean site perimeter", "Resubmit clear photo of DG serial plate", "Fix grounding cable on cabinet").
+
+Return strictly valid JSON matching this structure:
 {
   "site_id": "Extracted Site ID",
   "vendor_technician": "Technician Name",
   "pm_date": "YYYY-MM-DD",
   "verdict": "APPROVED" | "APPROVED WITH CONCERNS" | "REJECTED",
   "missing_equipment_photos": ["List missing or unclear photos e.g. Diesel Generator (DG), Rectifier, Battery"],
-  "critical_remarks": ["Short remark including missing mandatory photos"],
-  "supervisor_focus_notes": ["Action required from technician"]
+  "critical_remarks": ["Detailed specific site defects, alarms, or missing mandatory photo notes"],
+  "supervisor_focus_notes": ["Specific corrective actions required from technician"]
 }
-Note: If mandatory equipment (DG, Rectifier, Battery) is mentioned in the text report but lacks clear photo proof, set verdict to 'APPROVED WITH CONCERNS' or 'REJECTED' and list it in missing_equipment_photos. Keep array values brief.
 """
 
                 progress_bar = st.progress(0)
