@@ -474,17 +474,21 @@ with tab_pm:
 You are a senior telecom audit supervisor analyzing PM checksheets and attached site photos. 
 Examine ALL provided text and image pages carefully to extract accurate technical audit details.
 
-CRITICAL INSTRUCTIONS FOR ACCURACY:
-1. SITE DEFECTS & REMARKS:
-   - Identify specific physical defects mentioned in text or visible in photos (e.g., loose cabling, unanchored equipment, trash/leaves on site, high DG running hours, oil leaks, active alarms, missing lock).
-   - DO NOT write generic responses like "Failed site" or "High DG 1". State the EXACT issue (e.g., "High DG running hours (over limit)", "Oil leak detected on DG", "Trash/leaves found inside compound").
+STRICT DIESEL GENERATOR (DG) AUDIT RULES:
+1. DIESEL GENERATOR (DG) PHOTO & SCREEN MANDATE:
+   - Mandatory DG photo evidence includes: (a) Overall DG unit image, (b) DG LED Controller Display Screen photo showing running hours, and (c) Specific DG running hours numerical value in the text.
+   - IF ANY OF THESE ARE MISSING OR UNCLEAR:
+     * Explicitly list missing items in `missing_equipment_photos` (e.g. "DG overall photo missing", "DG LED screen photo missing", "DG running hours unrecorded").
+     * State clearly in `critical_remarks`: "Site without DG / DG evidence missing - Mandatory DG photo, LED screen image, and running hours required".
+     * Set the `verdict` to "REJECTED" or "APPROVED WITH CONCERNS".
 
-2. MANDATORY EQUIPMENT & PHOTO AUDIT:
-   - Check presence and photo clarity for all core assets: Diesel Generator (DG), Power Cabinet/Rectifiers, Battery Banks, Microwave Units, and Solar/Hybrid controllers.
-   - If an asset is reported in text but lacks a clear dedicated photo, explicitly list it under `missing_equipment_photos`.
+2. DIESEL GENERATOR REMARKS & DEFECT WARNINGS:
+   - RUNNING HOURS WARNING: Explicitly mention DG running hours value. Flag a WARNING if running hours are high or overdue for service.
+   - PHYSICAL DEFECTS: State if there are oil leaks, fuel leaks, broken canopy, loose wiring, low oil pressure, or active alarms.
+   - GENERAL SITE DEFECTS: Include other issues like trash/leaves inside compound, unanchored cabinets, or loose cabling.
 
 3. SUPERVISOR FOCUS NOTES:
-   - Provide concrete, actionable steps for the field technician (e.g., "Remove leaves and clean site perimeter", "Resubmit clear photo of DG serial plate", "Fix grounding cable on cabinet").
+   - Give direct instructions to technician (e.g., "Re-upload clear DG photo and DG LED screen showing running hours", "Clean oil leakage under DG").
 
 Return strictly valid JSON matching this structure:
 {
@@ -492,8 +496,8 @@ Return strictly valid JSON matching this structure:
   "vendor_technician": "Technician Name",
   "pm_date": "YYYY-MM-DD",
   "verdict": "APPROVED" | "APPROVED WITH CONCERNS" | "REJECTED",
-  "missing_equipment_photos": ["List missing or unclear photos e.g. Diesel Generator (DG), Rectifier, Battery"],
-  "critical_remarks": ["Detailed specific site defects, alarms, or missing mandatory photo notes"],
+  "missing_equipment_photos": ["List missing or unclear photos e.g. DG Unit, DG LED Screen, Rectifier, Battery"],
+  "critical_remarks": ["Detailed specific remarks: DG running hours, DG oil leaks/defects, or 'Site without DG / DG evidence missing'"],
   "supervisor_focus_notes": ["Specific corrective actions required from technician"]
 }
 """
