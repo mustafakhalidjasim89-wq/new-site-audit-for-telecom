@@ -343,4 +343,218 @@ with tab_audit:
     elif manual_site_input and not df_sites.empty:
         target_col = next((c for c in ['site_code', 'site_id', 'name'] if c in df_sites.columns), None)
         if target_col:
-            matched =
+            matched = df_sites[df_sites[target_col].astype(str).str.strip().str.upper() == manual_site_input]
+            if not matched.empty:
+                site_lat, site_lon = matched.iloc[0].get('latitude'), matched.iloc[0].get('longitude')
+                if site_lat and site_lon and user_lat and user_lon:
+                    dist_m = int(calculate_distance_km(user_lat, user_lon, site_lat, site_lon) * 1000)
+                    if dist_m <= 200:
+                        is_location_valid = True
+                        st.success(f"✅ GPS Validated ({dist_m}m away).")
+                    else:
+                        st.error(f"❌ GPS Mismatch: {dist_m}m away. Must be < 200m.")
+                else:
+                    st.warning("⚠️ GPS signal needed for validation.")
+            else:
+                is_location_valid = True
+        else:
+            is_location_valid = True
+    elif manual_site_input:
+        is_location_valid = True
+
+    if "captured_photos" not in st.session_state:
+        st.session_state["captured_photos"] = []
+
+    uploaded_files = []
+    if manual_site_input and is_location_valid:
+        input_mode = st.radio("Input Source:", ["Camera", "Gallery"], horizontal=True)
+        if input_mode == "Camera":
+            img_file = st.camera_input("Take Picture")
+            if img_file and not any(p.getvalue() == img_file.getvalue() for p in st.session_state["captured_photos"]):
+                st.session_state["captured_photos"].append(img_file)
+
+            if st.button("🗑️ Clear All"):
+                st.session_state["captured_photos"] = []
+                st.rerun()
+
+            uploaded_files = st.session_state["captured_photos"]
+        else:
+            img_files = st.file_uploader("Upload photos", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
+            if img_files:
+                uploaded_files.extend(img_files)
+
+        if uploaded_files:
+            cols = st.columns(6)
+            for idx, file in enumerate(uploaded_files):
+                with cols[idx % 6]:
+                    st.image(file, width=80)
+
+    if st.button("📤 Run Audit & Submit", use_container_width=True, disabled=(not manual_site_input or not is_location_valid)):
+        if not uploaded_files:
+            st.warning("Please attach at least one photo.")
+        else:
+            gemini_key = st.secrets.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
+            if not gemini_key:
+                st.error("Missing GEMINI_API_KEY!")
+            else:
+                with st.spinner("⚡ Processing Audit..."):
+                    try:
+                        client = genai.Client(api_key=gemini_key)
+                        pil_images = [optimize_image(f) for f in uploaded_files]
+
+                        SYSTEM_PROMPT = """
+You are a telecom audit engineer inspecting physical equipment, mandatory site assets, photo quality, and NTG Asset Tagging.
+
+MANDATORY AUDIT RULES FOR EQUIPMENT & PHOTO QUALITY:
+1. MANDATORY SITE EQUIPMENT CHECK: Verify presence and visual coverage of core site equipment: Diesel Generator (DG), Power Cabinet/Rectifiers, Battery Banks, Main Antenna/Tower structure, and Microwave units.
+2. MISSING OR UNCLEAR PHOTO COMPLIANCE: If any mandatory equipment (e.g., Diesel Generator (DG)) is not clearly visible in the uploaded images, or if a photo is blurry/dark/partially obstructed, you MUST explicitly flag it under "MISSING OR UNCLEAR EQUIPMENT PHOTOS".
+3. VERDICT RULE: If key mandatory items like DG or Rectifiers have NO clear photos attached, mark the Final Verdict as "PASS WITH CONCERNS" or "FAIL".
+
+MANDATORY OUTPUT FORMAT:
+### 1. EQUIPMENT QUANTITY COUNT & AUDIT
+| Equipment / Asset Description | Identified Model / Brand | Quantities Detected | Photo Status (Clear / Blurry / Missing) |
+| :--- | :--- | :--- | :--- |
+
+### 2. MISSING OR UNCLEAR EQUIPMENT PHOTOS
+* **Unclear / Poor Quality Photos:** List any equipment photos that are blurry, taken from a bad angle, or dark.
+* **Missing Mandatory Photos:** Explicitly state if photos for Diesel Generator (DG), Rectifiers, Batteries, or Cables are missing.
+
+### 3. NTG ASSET TAGGING & BARCODE VERIFICATION
+* **Equipment Identifiers:** Describe NTG tags and asset labels visible in photos.
+* **Cable & Port Labels:** Describe port labels/tags.
+
+### 4. FINAL VERDICT & DEFECTS
+* **Final Verdict:** [PASS / PASS WITH CONCERNS / FAIL]
+* **Identified Defects:** Note trash, loose cables, unanchored items, or missing clear photo proof.
+* **Corrective Actions:** Remediation steps (e.g., "Technician must re-upload a clear, full-view photo of the Diesel Generator (DG)").
+"""
+
+                        report_text = generate_gemini_content_robust(
+                            client=client,
+                            contents=[f"Site ID: {manual_site_input}\nTechnician: {tech_name_input or 'Unassigned'}", *pil_images],
+                            config=types.GenerateContentConfig(system_instruction=SYSTEM_PROMPT, temperature=0.0)
+                        )
+
+                        if report_text:
+                            st.subheader("📋 Audit Report")
+                            st.markdown(report_text)
+                            
+                            status_verdict = "FAIL" if "FAIL" in report_text.upper() else ("PASS WITH CONCERNS" if "CONCERNS" in report_text.upper() else "PASS")
+                            if save_report_to_supabase(manual_site_input, tech_name_input or 'Unassigned', status_verdict, report_text, user_lat, user_lon):
+                                st.success("✅ Audit logged successfully!")
+                                st.session_state["captured_photos"] = []
+                    except Exception as e:
+                        st.error(f"Audit processing failed: {str(e)}")
+
+# ---------------------------------------------------------
+# TAB 2: Multi-PM Analyzer (Batch PDF Upload & Processing)
+# ---------------------------------------------------------
+with tab_pm:
+    st.subheader("📄 Multi-PM Checksheet Analyzer")
+    
+    uploaded_pdfs = st.file_uploader(
+        "Upload Multiple PM PDF Files",
+        type=["pdf"],
+        accept_multiple_files=True,
+        help="Upload one or multiple PM checksheets simultaneously."
+    )
+
+    if uploaded_pdfs:
+        st.info(f"📂 **{len(uploaded_pdfs)}** PDF file(s) loaded.")
+
+        if st.button("🚀 Process All PM PDFs", use_container_width=True):
+            gemini_key = st.secrets.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
+            if not gemini_key:
+                st.error("Missing GEMINI_API_KEY!")
+            else:
+                client = genai.Client(api_key=gemini_key)
+                all_site_data = []
+
+                BATCH_SYSTEM_PROMPT = """
+You are a telecom supervisor auditing PM reports and uploaded checksheet photos. Extract key details strictly in valid JSON format without extra text:
+{
+  "site_id": "Extracted Site ID",
+  "vendor_technician": "Technician Name",
+  "pm_date": "YYYY-MM-DD",
+  "verdict": "APPROVED" | "APPROVED WITH CONCERNS" | "REJECTED",
+  "missing_equipment_photos": ["List missing or unclear photos e.g. Diesel Generator (DG), Rectifier, Battery"],
+  "critical_remarks": ["Short remark including missing mandatory photos"],
+  "supervisor_focus_notes": ["Action required from technician"]
+}
+Note: If mandatory equipment (DG, Rectifier, Battery) is mentioned in the text report but lacks clear photo proof, set verdict to 'APPROVED WITH CONCERNS' or 'REJECTED' and list it in missing_equipment_photos. Keep array values brief.
+"""
+
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+
+                for idx, pdf_file in enumerate(uploaded_pdfs):
+                    status_text.text(f"⚙️ Processing ({idx+1}/{len(uploaded_pdfs)}): {pdf_file.name}")
+                    
+                    # Process text and extract downscaled page images
+                    text_content, resized_page_images = process_and_resize_pdf(pdf_file)
+                    
+                    payload = [f"FILENAME: {pdf_file.name}\nEXTRACTED TEXT:\n{text_content}"]
+                    if resized_page_images:
+                        payload.extend(resized_page_images[:3])  # Send top 3 downscaled pages
+
+                    # Set max_output_tokens to 1024 to prevent JSON output truncation
+                    gen_config = types.GenerateContentConfig(
+                        system_instruction=BATCH_SYSTEM_PROMPT,
+                        temperature=0.0,
+                        max_output_tokens=1024,
+                        response_mime_type="application/json"
+                    )
+
+                    try:
+                        raw_response = generate_gemini_content_robust(
+                            client=client,
+                            contents=payload,
+                            config=gen_config
+                        )
+                        
+                        # Parse with robust JSON repair engine
+                        parsed = parse_gemini_json(raw_response)
+                        parsed["filename"] = pdf_file.name
+                        all_site_data.append(parsed)
+                        
+                    except Exception as e:
+                        all_site_data.append({
+                            "filename": pdf_file.name,
+                            "site_id": "ERROR",
+                            "vendor_technician": "N/A",
+                            "pm_date": "N/A",
+                            "verdict": "REJECTED",
+                            "missing_equipment_photos": ["Error parsing report"],
+                            "critical_remarks": [f"Processing error: {str(e)}"],
+                            "supervisor_focus_notes": ["Verify document format or JSON truncation"]
+                        })
+
+                    progress_bar.progress((idx + 1) / len(uploaded_pdfs))
+
+                status_text.success("✅ All PM files processed successfully!")
+                st.session_state["pm_analysis_results"] = all_site_data
+
+    if "pm_analysis_results" in st.session_state and st.session_state["pm_analysis_results"]:
+        results = st.session_state["pm_analysis_results"]
+        st.markdown("### 📋 Multi-PM Audit Summary")
+        
+        summary_rows = [{
+            "Site ID": r.get("site_id", "N/A"),
+            "Technician": r.get("vendor_technician", "N/A"),
+            "Date": r.get("pm_date", "N/A"),
+            "Verdict": r.get("verdict", "N/A"),
+            "Missing/Unclear Photos": " | ".join(r.get("missing_equipment_photos", [])) if isinstance(r.get("missing_equipment_photos"), list) else str(r.get("missing_equipment_photos", "")),
+            "Critical Remarks": " | ".join(r.get("critical_remarks", [])) if isinstance(r.get("critical_remarks"), list) else str(r.get("critical_remarks", "")),
+            "Focus Actions": " | ".join(r.get("supervisor_focus_notes", [])) if isinstance(r.get("supervisor_focus_notes"), list) else str(r.get("supervisor_focus_notes", "")),
+            "Filename": r.get("filename", "")
+        } for r in results]
+        
+        df_summary = pd.DataFrame(summary_rows)
+        st.dataframe(df_summary, use_container_width=True)
+
+        st.download_button(
+            label="📥 Download Multi-PM Summary (.xlsx)",
+            data=convert_df_to_excel(df_summary, sheet_name='PM_Summary'),
+            file_name="Multi_PM_Summary.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
