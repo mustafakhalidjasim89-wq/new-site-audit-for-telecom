@@ -14,7 +14,6 @@ import numpy as np
 import cv2
 from PIL import Image
 from math import radians, cos, sin, asin, sqrt
-import resend
 
 from google import genai
 from google.genai import types
@@ -23,6 +22,13 @@ from google.genai.errors import APIError
 from streamlit_js_eval import get_geolocation
 from supabase import create_client, Client
 from pypdf import PdfReader
+
+# Optional PyMuPDF (fitz) for rendering PDF pages as resized images
+try:
+    import fitz  # PyMuPDF
+    FITZ_AVAILABLE = True
+except ImportError:
+    FITZ_AVAILABLE = False
 
 # Optional PyZBar for barcode/QR reading
 try:
@@ -38,13 +44,17 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 if BASE_DIR not in sys.path:
     sys.path.append(BASE_DIR)
 
-from kml_parser import parse_telecom_kml
+try:
+    from kml_parser import parse_telecom_kml
+except ImportError:
+    def parse_telecom_kml(path):
+        return []
 
 # ---------------------------------------------------------
-# Helper: Aggressive Image Optimization for Fast Processing
+# Helper: Aggressive Image Optimization
 # ---------------------------------------------------------
 def optimize_image(uploaded_file, max_size=(800, 800), quality=75):
-    """Downscales and compresses images to decrease bandwidth and processing latency."""
+    """Downscales and compresses images to lower bandwidth usage."""
     img = Image.open(uploaded_file)
     if img.mode != 'RGB':
         img = img.convert('RGB')
@@ -57,58 +67,49 @@ def optimize_image(uploaded_file, max_size=(800, 800), quality=75):
     return Image.open(buffer)
 
 # ---------------------------------------------------------
-# Helper: Fast PDF Text Extractor & Cleaner
+# Helper: PDF Text & Resized Image Extractor
 # ---------------------------------------------------------
-def extract_and_clean_pdf_text(pdf_file, max_chars=4000):
+def process_and_resize_pdf(pdf_file, max_chars=4000, target_dpi=100, max_size=(800, 800)):
     """
-    Extracts text from PDF, cleans excess whitespace/newlines,
-    and caps length to slash Gemini payload size and processing time.
+    Extracts text and optionally converts scanned pages into resized/compressed images.
+    Reduces payload size significantly for rapid processing.
     """
+    text_content = ""
+    resized_images = []
+
     try:
-        reader = PdfReader(pdf_file)
+        pdf_bytes = pdf_file.read()
+        pdf_file.seek(0)
+
+        # 1. Extract and clean text using PyPDF
+        reader = PdfReader(io.BytesIO(pdf_bytes))
         raw_text = ""
         for page in reader.pages:
             t = page.extract_text()
             if t:
                 raw_text += t + "\n"
-        
-        # Strip excessive spaces, tabs, and repeating line breaks
-        cleaned_text = re.sub(r'\s+', ' ', raw_text).strip()
-        
-        # Truncate to essential text window for maximum speed
-        if len(cleaned_text) > max_chars:
-            cleaned_text = cleaned_text[:max_chars] + "... [TRUNCATED FOR SPEED]"
-            
-        return cleaned_text
+
+        text_content = re.sub(r'\s+', ' ', raw_text).strip()
+        if len(text_content) > max_chars:
+            text_content = text_content[:max_chars] + "... [TRUNCATED]"
+
+        # 2. If PyMuPDF is available, render and resize page images (useful for scanned PMs)
+        if FITZ_AVAILABLE:
+            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+            for page in doc:
+                pix = page.get_pixmap(dpi=target_dpi)
+                img = Image.open(io.BytesIO(pix.tobytes("jpeg")))
+                img.thumbnail(max_size, Image.Resampling.LANCZOS)
+                
+                buf = io.BytesIO()
+                img.save(buf, format="JPEG", quality=70, optimize=True)
+                buf.seek(0)
+                resized_images.append(Image.open(buf))
+
     except Exception as e:
-        st.error(f"Error reading {pdf_file.name}: {str(e)}")
-        return None
+        st.error(f"Error processing PDF '{pdf_file.name}': {str(e)}")
 
-# ---------------------------------------------------------
-# Helper: Barcode Scanner
-# ---------------------------------------------------------
-def scan_equipment_barcodes(uploaded_files):
-    if not PYZBAR_AVAILABLE:
-        return []
-
-    scanned_items = []
-    for idx, file in enumerate(uploaded_files):
-        try:
-            file.seek(0)
-            file_bytes = np.asarray(bytearray(file.read()), dtype=np.uint8)
-            file.seek(0)
-            img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
-
-            if img is not None:
-                for barcode in pyzbar_decode(img):
-                    scanned_items.append({
-                        "Photo": f"Photo #{idx + 1}",
-                        "Type": barcode.type,
-                        "Barcode / Serial": barcode.data.decode("utf-8")
-                    })
-        except Exception:
-            continue
-    return scanned_items
+    return text_content, resized_images
 
 # ---------------------------------------------------------
 # Helper: Distance Calculation
@@ -133,7 +134,7 @@ def generate_gemini_content_robust(client, contents, config):
         candidate_models.append(configured_model)
     
     # Active latest models
-    candidate_models.extend(["gemini-2.5-flash", "gemini-1.5-flash"])
+    candidate_models.extend(["gemini-3.6-flash", "gemini-2.5-flash"])
     
     # Remove duplicates while preserving order
     seen = set()
@@ -154,10 +155,6 @@ def generate_gemini_content_robust(client, contents, config):
                 continue
             elif "429" in str(api_err) or "RESOURCE_EXHAUSTED" in str(api_err):
                 time.sleep(5)
-                continue
-            else:
-                raise api_err
-    raise last_error
 
 # ---------------------------------------------------------
 # Helper: Supabase Client Connection
@@ -259,8 +256,6 @@ if not st.session_state["authenticated"]:
             else:
                 st.error("Invalid credentials.")
     st.stop()
-
-logged_user = st.session_state.get('logged_user')
 
 # ---------------------------------------------------------
 # 3. KML Loader
@@ -402,25 +397,32 @@ MANDATORY OUTPUT FORMAT:
                         st.error(f"Audit processing failed: {str(e)}")
 
 # ---------------------------------------------------------
-# TAB 2: Multi-PM Analyzer (Fast PDF Upload & Processing)
+# TAB 2: Multi-PM Analyzer (Multiple PDF Processing & Resizing)
 # ---------------------------------------------------------
 with tab_pm:
-    st.subheader("📄 PM Checksheet Analyzer")
-    uploaded_pdfs = st.file_uploader("Upload PM PDFs", type=["pdf"], accept_multiple_files=True)
+    st.subheader("📄 Multi-PM Checksheet Analyzer")
+    
+    # Multi-file PDF Upload
+    uploaded_pdfs = st.file_uploader(
+        "Upload Multiple PM PDF Files",
+        type=["pdf"],
+        accept_multiple_files=True,
+        help="Upload one or multiple PM checksheets simultaneously."
+    )
 
     if uploaded_pdfs:
-        st.caption(f"Files selected: **{len(uploaded_pdfs)}**")
+        st.info(f"📂 **{len(uploaded_pdfs)}** PDF file(s) loaded.")
 
-        if st.button("🚀 Fast Process All PDFs", use_container_width=True):
+        if st.button("🚀 Process All PM PDFs", use_container_width=True):
             gemini_key = st.secrets.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
             if not gemini_key:
-                st.error("Missing Gemini API Key!")
+                st.error("Missing GEMINI_API_KEY!")
             else:
                 client = genai.Client(api_key=gemini_key)
                 all_site_data = []
 
                 BATCH_SYSTEM_PROMPT = """
-You are a telecom supervisor auditing PM reports. Extract key indicators strictly in valid JSON format:
+You are a telecom supervisor auditing PM reports. Extract key details strictly in valid JSON format:
 {
   "site_id": "Extracted Site ID",
   "vendor_technician": "Technician Name",
@@ -431,73 +433,70 @@ You are a telecom supervisor auditing PM reports. Extract key indicators strictl
 }
 """
 
-                progress = st.progress(0)
+                progress_bar = st.progress(0)
                 status_text = st.empty()
 
-                for idx, pdf in enumerate(uploaded_pdfs):
-                    status_text.text(f"⚡ Processing ({idx+1}/{len(uploaded_pdfs)}): {pdf.name}")
+                for idx, pdf_file in enumerate(uploaded_pdfs):
+                    status_text.text(f"⚙️ Processing ({idx+1}/{len(uploaded_pdfs)}): {pdf_file.name}")
                     
-                    # Clean and compress text to minimize API payload size and speed up uploads
-                    cleaned_text = extract_and_clean_pdf_text(pdf)
+                    # Extract text and convert PDF pages into resized images for high efficiency
+                    text_content, resized_page_images = process_and_resize_pdf(pdf_file)
                     
-                    if cleaned_text:
-                        user_prompt = f"FILENAME: {pdf.name}\n\nTEXT:\n{cleaned_text}"
-                        gen_config = types.GenerateContentConfig(
-                            system_instruction=BATCH_SYSTEM_PROMPT,
-                            temperature=0.0,
-                            max_output_tokens=350,
-                            response_mime_type="application/json"
-                        )
+                    # Build payload using extracted text and optimized page images
+                    payload = [f"FILENAME: {pdf_file.name}\nEXTRACTED TEXT:\n{text_content}"]
+                    if resized_page_images:
+                        payload.extend(resized_page_images[:5])  # Cap at top 5 resized pages
 
-                        try:
-                            json_response = generate_gemini_content_robust(
-                                client=client,
-                                contents=[user_prompt],
-                                config=gen_config
-                            )
-                            parsed = json.loads(json_response)
-                            parsed["filename"] = pdf.name
-                            all_site_data.append(parsed)
-                        except Exception as e:
-                            all_site_data.append({
-                                "filename": pdf.name,
-                                "site_id": "ERROR",
-                                "verdict": "REJECTED",
-                                "critical_remarks": [f"Parsing error: {str(e)}"],
-                                "supervisor_focus_notes": ["Re-check document"]
-                            })
-                    else:
+                    gen_config = types.GenerateContentConfig(
+                        system_instruction=BATCH_SYSTEM_PROMPT,
+                        temperature=0.0,
+                        max_output_tokens=400,
+                        response_mime_type="application/json"
+                    )
+
+                    try:
+                        json_response = generate_gemini_content_robust(
+                            client=client,
+                            contents=payload,
+                            config=gen_config
+                        )
+                        parsed = json.loads(json_response)
+                        parsed["filename"] = pdf_file.name
+                        all_site_data.append(parsed)
+                    except Exception as e:
                         all_site_data.append({
-                            "filename": pdf.name,
-                            "site_id": "EMPTY",
+                            "filename": pdf_file.name,
+                            "site_id": "ERROR",
                             "verdict": "REJECTED",
-                            "critical_remarks": ["No readable text extracted."],
-                            "supervisor_focus_notes": ["Verify if PDF is an image scan."]
+                            "critical_remarks": [f"Processing error: {str(e)}"],
+                            "supervisor_focus_notes": ["Verify document format"]
                         })
 
-                    progress.progress((idx + 1) / len(uploaded_pdfs))
+                    progress_bar.progress((idx + 1) / len(uploaded_pdfs))
 
-                status_text.success("✅ Batch processing completed!")
+                status_text.success("✅ All PM files processed successfully!")
                 st.session_state["pm_analysis_results"] = all_site_data
 
     if "pm_analysis_results" in st.session_state and st.session_state["pm_analysis_results"]:
         results = st.session_state["pm_analysis_results"]
-        st.markdown("### 📋 PM Analysis Summary")
+        st.markdown("### 📋 Multi-PM Audit Summary")
         
         summary_rows = [{
             "Site ID": r.get("site_id", "N/A"),
+            "Technician": r.get("vendor_technician", "N/A"),
+            "Date": r.get("pm_date", "N/A"),
             "Verdict": r.get("verdict", "N/A"),
             "Critical Remarks": " | ".join(r.get("critical_remarks", [])),
             "Focus Actions": " | ".join(r.get("supervisor_focus_notes", [])),
-            "File": r.get("filename", "")
+            "Filename": r.get("filename", "")
         } for r in results]
         
         df_summary = pd.DataFrame(summary_rows)
         st.dataframe(df_summary, use_container_width=True)
 
         st.download_button(
-            label="📥 Download Summary Excel (.xlsx)",
+            label="📥 Download Multi-PM Summary (.xlsx)",
             data=convert_df_to_excel(df_summary, sheet_name='PM_Summary'),
-            file_name="PM_Summary.xlsx",
+            file_name="Multi_PM_Summary.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
