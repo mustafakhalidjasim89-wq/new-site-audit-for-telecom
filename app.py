@@ -69,10 +69,10 @@ def optimize_image(uploaded_file, max_size=(800, 800), quality=75):
 # ---------------------------------------------------------
 # Helper: PDF Text & Resized Image Extractor
 # ---------------------------------------------------------
-def process_and_resize_pdf(pdf_file, max_chars=4000, target_dpi=100, max_size=(800, 800)):
+def process_and_resize_pdf(pdf_file, max_chars=3500, target_dpi=100, max_size=(800, 800)):
     """
-    Extracts text and optionally converts scanned pages into resized/compressed images.
-    Reduces payload size significantly for rapid processing.
+    Extracts text and converts scanned PDF pages into downscaled JPEG images.
+    Drastically decreases payload size and execution latency.
     """
     text_content = ""
     resized_images = []
@@ -91,9 +91,9 @@ def process_and_resize_pdf(pdf_file, max_chars=4000, target_dpi=100, max_size=(8
 
         text_content = re.sub(r'\s+', ' ', raw_text).strip()
         if len(text_content) > max_chars:
-            text_content = text_content[:max_chars] + "... [TRUNCATED]"
+            text_content = text_content[:max_chars] + "... [TRUNCATED FOR SPEED]"
 
-        # 2. If PyMuPDF is available, render and resize page images (useful for scanned PMs)
+        # 2. Render and resize PDF pages as images if PyMuPDF is available
         if FITZ_AVAILABLE:
             doc = fitz.open(stream=pdf_bytes, filetype="pdf")
             for page in doc:
@@ -110,6 +110,46 @@ def process_and_resize_pdf(pdf_file, max_chars=4000, target_dpi=100, max_size=(8
         st.error(f"Error processing PDF '{pdf_file.name}': {str(e)}")
 
     return text_content, resized_images
+
+# ---------------------------------------------------------
+# Helper: Robust JSON Output Parser & Repair Engine
+# ---------------------------------------------------------
+def parse_gemini_json(raw_text):
+    """
+    Cleans markdown formatting and repairs common JSON truncation or escaping errors.
+    Prevents 'Unterminated string' crashes when Gemini outputs dense logs.
+    """
+    if not raw_text:
+        raise ValueError("Empty response received from Gemini.")
+    
+    # 1. Strip Markdown standard code blocks
+    cleaned = re.sub(r"```(?:json)?", "", raw_text, flags=re.IGNORECASE).strip()
+    cleaned = cleaned.strip("`")
+
+    # 2. Direct JSON Parse
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
+
+    # 3. Extract JSON object substring via Regex
+    match = re.search(r'\{.*\}', cleaned, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group(0))
+        except json.JSONDecodeError:
+            pass
+
+    # 4. Attempt tail-repair for truncated strings or missing brackets
+    try:
+        repaired = cleaned.strip()
+        if not repaired.endswith("}"):
+            if not repaired.endswith('"'):
+                repaired += '"'
+            repaired += "\n}"
+        return json.loads(repaired)
+    except Exception:
+        raise ValueError(f"Unparseable output from model: {raw_text[:120]}...")
 
 # ---------------------------------------------------------
 # Helper: Distance Calculation
@@ -155,6 +195,7 @@ def generate_gemini_content_robust(client, contents, config):
                 continue
             elif "429" in str(api_err) or "RESOURCE_EXHAUSTED" in str(api_err):
                 time.sleep(5)
+    raise last_error
 
 # ---------------------------------------------------------
 # Helper: Supabase Client Connection
@@ -397,12 +438,11 @@ MANDATORY OUTPUT FORMAT:
                         st.error(f"Audit processing failed: {str(e)}")
 
 # ---------------------------------------------------------
-# TAB 2: Multi-PM Analyzer (Multiple PDF Processing & Resizing)
+# TAB 2: Multi-PM Analyzer (Batch PDF Upload & Processing)
 # ---------------------------------------------------------
 with tab_pm:
     st.subheader("📄 Multi-PM Checksheet Analyzer")
     
-    # Multi-file PDF Upload
     uploaded_pdfs = st.file_uploader(
         "Upload Multiple PM PDF Files",
         type=["pdf"],
@@ -422,15 +462,16 @@ with tab_pm:
                 all_site_data = []
 
                 BATCH_SYSTEM_PROMPT = """
-You are a telecom supervisor auditing PM reports. Extract key details strictly in valid JSON format:
+You are a telecom supervisor auditing PM reports. Extract key details strictly in valid JSON format without extra text:
 {
   "site_id": "Extracted Site ID",
   "vendor_technician": "Technician Name",
   "pm_date": "YYYY-MM-DD",
-  "verdict": "APPROVED" | "APPROVED WITH CONCERNS" | "REJECTED",
-  "critical_remarks": ["Key observations or failures"],
-  "supervisor_focus_notes": ["Action items required"]
+  "verdict": "APPROVED",
+  "critical_remarks": ["Short remark"],
+  "supervisor_focus_notes": ["Action required"]
 }
+Keep array values brief and concise.
 """
 
                 progress_bar = st.progress(0)
@@ -439,37 +480,42 @@ You are a telecom supervisor auditing PM reports. Extract key details strictly i
                 for idx, pdf_file in enumerate(uploaded_pdfs):
                     status_text.text(f"⚙️ Processing ({idx+1}/{len(uploaded_pdfs)}): {pdf_file.name}")
                     
-                    # Extract text and convert PDF pages into resized images for high efficiency
+                    # Process text and extract downscaled page images
                     text_content, resized_page_images = process_and_resize_pdf(pdf_file)
                     
-                    # Build payload using extracted text and optimized page images
                     payload = [f"FILENAME: {pdf_file.name}\nEXTRACTED TEXT:\n{text_content}"]
                     if resized_page_images:
-                        payload.extend(resized_page_images[:5])  # Cap at top 5 resized pages
+                        payload.extend(resized_page_images[:3])  # Send top 3 downscaled pages
 
+                    # Set max_output_tokens to 1024 to prevent JSON output truncation
                     gen_config = types.GenerateContentConfig(
                         system_instruction=BATCH_SYSTEM_PROMPT,
                         temperature=0.0,
-                        max_output_tokens=400,
+                        max_output_tokens=1024,
                         response_mime_type="application/json"
                     )
 
                     try:
-                        json_response = generate_gemini_content_robust(
+                        raw_response = generate_gemini_content_robust(
                             client=client,
                             contents=payload,
                             config=gen_config
                         )
-                        parsed = json.loads(json_response)
+                        
+                        # Parse with robust JSON repair engine
+                        parsed = parse_gemini_json(raw_response)
                         parsed["filename"] = pdf_file.name
                         all_site_data.append(parsed)
+                        
                     except Exception as e:
                         all_site_data.append({
                             "filename": pdf_file.name,
                             "site_id": "ERROR",
+                            "vendor_technician": "N/A",
+                            "pm_date": "N/A",
                             "verdict": "REJECTED",
                             "critical_remarks": [f"Processing error: {str(e)}"],
-                            "supervisor_focus_notes": ["Verify document format"]
+                            "supervisor_focus_notes": ["Verify document format or JSON truncation"]
                         })
 
                     progress_bar.progress((idx + 1) / len(uploaded_pdfs))
@@ -486,8 +532,8 @@ You are a telecom supervisor auditing PM reports. Extract key details strictly i
             "Technician": r.get("vendor_technician", "N/A"),
             "Date": r.get("pm_date", "N/A"),
             "Verdict": r.get("verdict", "N/A"),
-            "Critical Remarks": " | ".join(r.get("critical_remarks", [])),
-            "Focus Actions": " | ".join(r.get("supervisor_focus_notes", [])),
+            "Critical Remarks": " | ".join(r.get("critical_remarks", [])) if isinstance(r.get("critical_remarks"), list) else str(r.get("critical_remarks", "")),
+            "Focus Actions": " | ".join(r.get("supervisor_focus_notes", [])) if isinstance(r.get("supervisor_focus_notes"), list) else str(r.get("supervisor_focus_notes", "")),
             "Filename": r.get("filename", "")
         } for r in results]
         
