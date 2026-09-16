@@ -7,6 +7,7 @@ import json
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -14,14 +15,16 @@ import cv2
 from PIL import Image
 from math import radians, cos, sin, asin, sqrt
 import resend
+
 from google import genai
 from google.genai import types
 from google.genai.errors import APIError
+
 from streamlit_js_eval import get_geolocation
 from supabase import create_client, Client
 from pypdf import PdfReader
 
-# PyZBar for barcode/QR reading (fails gracefully if library is missing)
+# Optional PyZBar for barcode/QR reading
 try:
     from pyzbar.pyzbar import decode as pyzbar_decode
     PYZBAR_AVAILABLE = True
@@ -29,56 +32,60 @@ except ImportError:
     PYZBAR_AVAILABLE = False
 
 # ---------------------------------------------------------
-# 0. Fix Import Paths & Absolute Workspace Directory
+# 0. Path Resolution & Setup
 # ---------------------------------------------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 if BASE_DIR not in sys.path:
     sys.path.append(BASE_DIR)
 
 from kml_parser import parse_telecom_kml
-from geo_utils import find_nearby_sites
 
 # ---------------------------------------------------------
-# Helper: Image Optimization to Prevent Timeouts
+# Helper: Aggressive Image Optimization for Fast Processing
 # ---------------------------------------------------------
-def optimize_image(uploaded_file, max_size=(1024, 1024)):
-    """Resize and compress image to lower network upload time."""
+def optimize_image(uploaded_file, max_size=(800, 800), quality=75):
+    """Downscales and compresses images to decrease bandwidth and processing latency."""
     img = Image.open(uploaded_file)
     if img.mode != 'RGB':
         img = img.convert('RGB')
-    img.thumbnail(max_size)
+    
+    img.thumbnail(max_size, Image.Resampling.LANCZOS)
     
     buffer = io.BytesIO()
-    img.save(buffer, format="JPEG", quality=80)
+    img.save(buffer, format="JPEG", quality=quality, optimize=True)
     buffer.seek(0)
     return Image.open(buffer)
 
 # ---------------------------------------------------------
-# Helper: Extract Pure Site Code Only
+# Helper: Fast PDF Text Extractor & Cleaner
 # ---------------------------------------------------------
-def get_clean_site_id(raw_str):
-    if not raw_str or str(raw_str).strip() in ["-- Select Site --", "-- No Sites Found --"]:
-        return ""
-    return str(raw_str).strip().upper()
-
-# ---------------------------------------------------------
-# Helper: Extract Text from PDF Files
-# ---------------------------------------------------------
-def extract_text_from_pdf(pdf_file):
+def extract_and_clean_pdf_text(pdf_file, max_chars=4000):
+    """
+    Extracts text from PDF, cleans excess whitespace/newlines,
+    and caps length to slash Gemini payload size and processing time.
+    """
     try:
         reader = PdfReader(pdf_file)
-        text = ""
+        raw_text = ""
         for page in reader.pages:
-            extracted = page.extract_text()
-            if extracted:
-                text += extracted + "\n"
-        return text
+            t = page.extract_text()
+            if t:
+                raw_text += t + "\n"
+        
+        # Strip excessive spaces, tabs, and repeating line breaks
+        cleaned_text = re.sub(r'\s+', ' ', raw_text).strip()
+        
+        # Truncate to essential text window for maximum speed
+        if len(cleaned_text) > max_chars:
+            cleaned_text = cleaned_text[:max_chars] + "... [TRUNCATED FOR SPEED]"
+            
+        return cleaned_text
     except Exception as e:
-        st.error(f"Error reading PDF file ({pdf_file.name}): {str(e)}")
+        st.error(f"Error reading {pdf_file.name}: {str(e)}")
         return None
 
 # ---------------------------------------------------------
-# Helper: Barcode & Label Scanner
+# Helper: Barcode Scanner
 # ---------------------------------------------------------
 def scan_equipment_barcodes(uploaded_files):
     if not PYZBAR_AVAILABLE:
@@ -93,8 +100,7 @@ def scan_equipment_barcodes(uploaded_files):
             img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
 
             if img is not None:
-                barcodes = pyzbar_decode(img)
-                for barcode in barcodes:
+                for barcode in pyzbar_decode(img):
                     scanned_items.append({
                         "Photo": f"Photo #{idx + 1}",
                         "Type": barcode.type,
@@ -105,140 +111,14 @@ def scan_equipment_barcodes(uploaded_files):
     return scanned_items
 
 # ---------------------------------------------------------
-# Helper: Email Dispatcher via Gmail SMTP (Fallback to Resend)
-# ---------------------------------------------------------
-def send_email_notification(site_id, technician, status, report_text, user_lat, user_lon):
-    receiver_email = st.secrets.get("ADMIN_RECEIVER_EMAIL") or os.environ.get("ADMIN_RECEIVER_EMAIL") or "mustafa.khalid@asiacell.com"
-    sender_email = st.secrets.get("SENDER_EMAIL") or os.environ.get("SENDER_EMAIL") or "mustafa.khalid@asiacell.com"
-    sender_password = st.secrets.get("SENDER_PASSWORD") or os.environ.get("SENDER_PASSWORD")
-    
-    gmail_server = st.secrets.get("GMAIL_SERVER") or os.environ.get("GMAIL_SERVER") or "smtp.gmail.com"
-    gmail_port = int(st.secrets.get("GMAIL_PORT") or os.environ.get("GMAIL_PORT") or 587)
-
-    status_color = "#16a34a" if status == "PASS" else ("#ca8a04" if "CONCERNS" in status else "#dc2626")
-
-    html_body = f"""
-    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 8px;">
-        <h2 style="color: #0284c7; margin-bottom: 5px;">📡 Telecom Site Audit & NTG Tagging Report</h2>
-        <hr style="border: 0; border-top: 1px solid #eee;">
-        
-        <table style="width: 100%; margin-top: 15px; font-size: 14px;">
-            <tr><td><strong>Site ID:</strong></td><td>{site_id}</td></tr>
-            <tr><td><strong>Technician:</strong></td><td>{technician}</td></tr>
-            <tr><td><strong>Coordinates:</strong></td><td>{user_lat}, {user_lon}</td></tr>
-            <tr><td><strong>Audit Status:</strong></td><td><span style="background-color: {status_color}; color: white; padding: 4px 8px; border-radius: 4px; font-weight: bold;">{status}</span></td></tr>
-        </table>
-
-        <hr style="border: 0; border-top: 1px solid #eee; margin: 20px 0;">
-
-        <h3 style="color: #333;">🤖 Equipment Inventory & NTG Tagging Findings</h3>
-        <div style="background-color: #f8fafc; padding: 15px; border-left: 4px solid #0284c7; border-radius: 4px; white-space: pre-wrap; font-size: 13px; line-height: 1.6;">
-{report_text}
-        </div>
-
-        <p style="font-size: 11px; color: #94a3b8; margin-top: 25px; text-align: center;">
-            Automated Audit Notification • Asiacell R3-BAG-CLS5
-        </p>
-    </div>
-    """
-
-    if sender_password and sender_password != "your-actual-asiacell-password":
-        try:
-            msg = MIMEMultipart("alternative")
-            msg["Subject"] = f"🚨 Site Audit Report: {site_id} [{status}]"
-            msg["From"] = sender_email
-            msg["To"] = receiver_email
-            msg.attach(MIMEText(html_body, "html"))
-
-            server = smtplib.SMTP(gmail_server, gmail_port)
-            server.starttls()
-            server.login(sender_email, sender_password)
-            server.sendmail(sender_email, receiver_email, msg.as_string())
-            server.quit()
-            return True
-        except Exception as e:
-            st.warning(f"⚠️ Gmail SMTP dispatch failed ({str(e)}). Attempting Resend API...")
-
-    resend_key = st.secrets.get("RESEND_API_KEY") or os.environ.get("RESEND_API_KEY")
-    if resend_key:
-        try:
-            resend.api_key = resend_key
-            resend.Emails.send({
-                "from": "Telecom Audit <onboarding@resend.dev>",
-                "to": receiver_email,
-                "subject": f"🚨 Site Audit Report: {site_id} [{status}]",
-                "html": html_body
-            })
-            return True
-        except Exception as e:
-            st.warning(f"⚠️ Resend dispatch failed: {str(e)}")
-
-    st.warning("⚠️ Email notification skipped: Configure Gmail App Password or Resend API key.")
-    return False
-
-# ---------------------------------------------------------
-# Helper: Supabase Client Connection
-# ---------------------------------------------------------
-def get_supabase_client() -> Client:
-    url = st.secrets.get("SUPABASE_URL") or os.environ.get("SUPABASE_URL")
-    key = st.secrets.get("SUPABASE_KEY") or os.environ.get("SUPABASE_KEY")
-    if not url or not key:
-        return None
-    return create_client(url, key)
-
-def save_report_to_supabase(site_id, technician, status, report_text, user_lat, user_lon):
-    try:
-        supabase = get_supabase_client()
-        if not supabase:
-            st.error("❌ Supabase URL or Key missing in Streamlit Secrets!")
-            return False
-
-        data = {
-            "site_id": site_id,
-            "technician": technician,
-            "coordinates": f"{user_lat}, {user_lon}" if user_lat else "N/A",
-            "status": status,
-            "report_text": report_text
-        }
-        supabase.table("audit_reports").insert(data).execute()
-        send_email_notification(site_id, technician, status, report_text, user_lat, user_lon)
-        return True
-    except Exception as e:
-        st.error(f"⚠️ Database submission failed: {str(e)}")
-        return False
-
-def fetch_supabase_reports():
-    try:
-        supabase = get_supabase_client()
-        if not supabase:
-            return pd.DataFrame()
-        res = supabase.table("audit_reports").select("*").order("created_at", desc=True).execute()
-        return pd.DataFrame(res.data)
-    except Exception as e:
-        st.error(f"⚠️ Failed to fetch remote reports: {str(e)}")
-        return pd.DataFrame()
-
-# ---------------------------------------------------------
-# Helper: Convert DataFrame to Excel Binary Buffer
-# ---------------------------------------------------------
-def convert_df_to_excel(df, sheet_name='Audit_Reports'):
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False, sheet_name=sheet_name)
-    output.seek(0)
-    return output.getvalue()
-
-# ---------------------------------------------------------
-# Helper: Haversine Distance Formula (km)
+# Helper: Distance Calculation
 # ---------------------------------------------------------
 def calculate_distance_km(lat1, lon1, lat2, lon2):
     try:
         lat1, lon1, lat2, lon2 = map(radians, [float(lat1), float(lon1), float(lat2), float(lon2)])
-        dlat = lat2 - lat1
-        dlon = lon2 - lon1
+        dlat, dlon = lat2 - lat1, lon2 - lon1
         a = sin(dlat / 2)**2 + cos(lat1) * cos(lat2) * sin(dlon / 2)**2
-        c = 2 * asin(sqrt(a))
-        return c * 6371.0
+        return 2 * asin(sqrt(a)) * 6371.0
     except (ValueError, TypeError):
         return float('inf')
 
@@ -280,38 +160,76 @@ def generate_gemini_content_robust(client, contents, config):
     raise last_error
 
 # ---------------------------------------------------------
-# 1. Page Config & Custom Dark UI Styling
+# Helper: Supabase Client Connection
+# ---------------------------------------------------------
+def get_supabase_client() -> Client:
+    url = st.secrets.get("SUPABASE_URL") or os.environ.get("SUPABASE_URL")
+    key = st.secrets.get("SUPABASE_KEY") or os.environ.get("SUPABASE_KEY")
+    return create_client(url, key) if url and key else None
+
+def save_report_to_supabase(site_id, technician, status, report_text, user_lat, user_lon):
+    try:
+        supabase = get_supabase_client()
+        if not supabase:
+            st.error("❌ Supabase URL or Key missing!")
+            return False
+
+        data = {
+            "site_id": site_id,
+            "technician": technician,
+            "coordinates": f"{user_lat}, {user_lon}" if user_lat else "N/A",
+            "status": status,
+            "report_text": report_text
+        }
+        supabase.table("audit_reports").insert(data).execute()
+        return True
+    except Exception as e:
+        st.error(f"⚠️ Database error: {str(e)}")
+        return False
+
+def convert_df_to_excel(df, sheet_name='Audit_Reports'):
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name=sheet_name)
+    return output.getvalue()
+
+# ---------------------------------------------------------
+# 1. Page Config & CSS
 # ---------------------------------------------------------
 st.set_page_config(
-    page_title="Telecom Site Audit AI",
+    page_title="Telecom Audit AI",
     page_icon="📡",
-    layout="wide"
+    layout="centered",
+    initial_sidebar_state="collapsed"
 )
 
 st.markdown("""
     <style>
+    .block-container {
+        padding-top: 1.5rem;
+        padding-bottom: 1.5rem;
+        padding-left: 1rem;
+        padding-right: 1rem;
+        max-width: 950px;
+    }
     .stApp {
-        background-color: #1a1d24;
-        color: #ffffff;
+        background-color: #121417;
+        color: #e2e8f0;
     }
     .header-card {
-        background-color: #222630;
-        padding: 18px;
-        border-radius: 12px;
-        margin-bottom: 20px;
-        border: 1px solid #343a46;
+        background-color: #1e222b;
+        padding: 12px 16px;
+        border-radius: 8px;
+        margin-bottom: 12px;
+        border: 1px solid #2d3442;
     }
     .stButton>button {
         background-color: #2563eb;
         color: white;
-        border-radius: 8px;
+        border-radius: 6px;
         border: none;
-        padding: 12px 24px;
+        padding: 8px 16px;
         font-weight: 600;
-        font-size: 16px;
-    }
-    .stButton>button:hover {
-        background-color: #1d4ed8;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -330,340 +248,204 @@ if "authenticated" not in st.session_state:
 
 if not st.session_state["authenticated"]:
     st.title("🔒 Telecom Site Audit AI - Login")
-    
     with st.form("login_form"):
         username_input = st.text_input("Username").strip()
         password_input = st.text_input("Password", type="password").strip()
-        submit_button = st.form_submit_button("Log In")
-        
-        if submit_button:
+        if st.form_submit_button("Log In"):
             if USER_CREDENTIALS.get(username_input) == password_input:
                 st.session_state["authenticated"] = True
                 st.session_state["logged_user"] = username_input
                 st.rerun()
             else:
-                st.error("Invalid username or password.")
+                st.error("Invalid credentials.")
     st.stop()
 
 logged_user = st.session_state.get('logged_user')
-st.sidebar.write(f"Logged in as: **{logged_user}**")
-if st.sidebar.button("Log Out"):
-    st.session_state["authenticated"] = False
-    st.rerun()
 
 # ---------------------------------------------------------
-# 3. Absolute Path KML Resolver
+# 3. KML Loader
 # ---------------------------------------------------------
 KML_EXACT_PATH = os.path.join(BASE_DIR, "data", "sites.kml")
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=300)
 def load_kml_dataset():
     if os.path.exists(KML_EXACT_PATH):
         return parse_telecom_kml(KML_EXACT_PATH)
-    
-    data_dir = os.path.join(BASE_DIR, "data")
-    if os.path.exists(data_dir):
-        files = [os.path.join(data_dir, f) for f in os.listdir(data_dir) if f.lower().endswith('.kml')]
-        if files:
-            return parse_telecom_kml(files[0])
-            
     return []
 
-raw_sites = load_kml_dataset()
-df_sites = pd.DataFrame(raw_sites)
+df_sites = pd.DataFrame(load_kml_dataset())
 
 # ---------------------------------------------------------
 # 4. Header & Navigation Tabs
 # ---------------------------------------------------------
 st.markdown("""
     <div class='header-card'>
-        <h2 style='color: #00d2ff; margin:0;'>📡 Telecom Site Audit AI (NTG Tagging)</h2>
-        <p style='color: #8e9aaf; margin:4px 0 0 0;'>Designed by Mustafa Khalid / Supervisor / R3-BAG-CLS5</p>
+        <h3 style='color: #38bdf8; margin:0;'>📡 Telecom Site Audit AI (NTG Tagging)</h3>
+        <p style='color: #94a3b8; margin:2px 0 0 0; font-size:12px;'>R3-BAG-CLS5 Supervisor Engine</p>
     </div>
 """, unsafe_allow_html=True)
 
-if logged_user == "admin":
-    tab_audit, tab_pm, tab_reports = st.tabs([
-        "🔍 Field Site Audit & NTG Tagging", 
-        "📄 PM Report Analyzer (PDF)",
-        "📊 Admin Remote Reports Dashboard"
-    ])
-else:
-    tab_audit, tab_pm = st.tabs([
-        "🔍 Field Site Audit & NTG Tagging", 
-        "📄 PM Report Analyzer (PDF)"
-    ])
-    tab_reports = None
+tab_audit, tab_pm = st.tabs(["🔍 Field Audit & NTG", "📄 Multi-PM Analyzer"])
 
 # ---------------------------------------------------------
-# TAB 1: Field Site Audit
+# TAB 1: Field Audit
 # ---------------------------------------------------------
 with tab_audit:
     col_site, col_tech = st.columns(2)
-
     with col_site:
-        manual_site_input = st.text_input(
-            "ENTER SITE ID", 
-            placeholder="e.g. BAG0123 or BAG0000"
-        ).strip().upper()
-        
-        selected_site_code = manual_site_input if manual_site_input else ""
-
+        manual_site_input = st.text_input("SITE ID", placeholder="BAG0123").strip().upper()
     with col_tech:
-        tech_name_input = st.text_input("TECHNICIAN NAME", placeholder="e.g. Alaa Fadel").strip()
+        tech_name_input = st.text_input("TECHNICIAN", placeholder="Tech Name").strip()
 
     loc = get_geolocation()
-    user_lat, user_lon = None, None
-
-    if loc and 'coords' in loc:
-        user_lat = loc['coords']['latitude']
-        user_lon = loc['coords']['longitude']
-        st.sidebar.success(f"🌐 GPS Active: {user_lat:.4f}, {user_lon:.4f}")
-    else:
-        st.sidebar.warning("⚠️ GPS inactive. Please enable browser location permissions.")
+    user_lat, user_lon = (loc['coords']['latitude'], loc['coords']['longitude']) if loc and 'coords' in loc else (None, None)
 
     is_location_valid = False
-    site_data = None
-
-    # ---- JOKER SITE CHECK (BAG0000) ----
-    if selected_site_code == "BAG0000":
+    if manual_site_input == "BAG0000":
         is_location_valid = True
-        st.success("🃏 **Joker Test Site Activated (BAG0000)**: GPS validation distance check bypassed. You can audit from any location!")
-
-    elif selected_site_code and not df_sites.empty:
-        possible_cols = ['site_code', 'site_id', 'name', 'Site_Code', 'SiteID', 'Name']
-        target_col = next((c for c in possible_cols if c in df_sites.columns), None)
-
+        st.success("🃏 Joker Test Site Active (BAG0000). GPS validation bypassed.")
+    elif manual_site_input and not df_sites.empty:
+        target_col = next((c for c in ['site_code', 'site_id', 'name'] if c in df_sites.columns), None)
         if target_col:
-            matched = df_sites[df_sites[target_col].astype(str).str.strip().str.upper() == selected_site_code]
-            
+            matched = df_sites[df_sites[target_col].astype(str).str.strip().str.upper() == manual_site_input]
             if not matched.empty:
-                site_data = matched.iloc[0].to_dict()
-                site_lat = site_data.get('latitude')
-                site_lon = site_data.get('longitude')
-
-                if site_lat and site_lon:
-                    st.info(f"📍 Target Site Coordinates: Lat {site_lat}, Lon {site_lon}")
-                    
-                    if user_lat is not None and user_lon is not None:
-                        distance_km = calculate_distance_km(user_lat, user_lon, site_lat, site_lon)
-                        distance_meters = int(distance_km * 1000)
-
-                        if distance_km <= 0.2:
-                            is_location_valid = True
-                            st.success(f"✅ GPS Match Confirmed: You are **{distance_meters} meters** from the site (Within 200 m limit).")
-                        else:
-                            dist_str = f"{distance_meters} meters" if distance_km < 1.0 else f"{distance_km:.2f} km"
-                            st.error(f"❌ Location Mismatch: You are **{dist_str}** away from this site. Must be within **200 meters**.")
+                site_lat, site_lon = matched.iloc[0].get('latitude'), matched.iloc[0].get('longitude')
+                if site_lat and site_lon and user_lat and user_lon:
+                    dist_m = int(calculate_distance_km(user_lat, user_lon, site_lat, site_lon) * 1000)
+                    if dist_m <= 200:
+                        is_location_valid = True
+                        st.success(f"✅ GPS Validated ({dist_m}m away).")
                     else:
-                        st.warning("⚠️ GPS Signal Required: Please enable device location permissions.")
+                        st.error(f"❌ GPS Mismatch: {dist_m}m away. Must be < 200m.")
+                else:
+                    st.warning("⚠️ GPS signal needed for validation.")
             else:
-                st.warning(f"⚠️ Site ID **{selected_site_code}** not found in the loaded KML dataset. Proceeding as unmapped site.")
                 is_location_valid = True
         else:
             is_location_valid = True
-    elif selected_site_code:
+    elif manual_site_input:
         is_location_valid = True
-
-    st.markdown("### PHOTOS")
 
     if "captured_photos" not in st.session_state:
         st.session_state["captured_photos"] = []
 
     uploaded_files = []
-
-    if not selected_site_code:
-        st.error("🔒 Photo upload and submission are locked. Enter a Site ID to begin.")
-    elif not is_location_valid:
-        st.error("🔒 Location verification failed. Ensure you are within 200 meters of the site.")
-    else:
-        input_mode = st.radio("Choose Input Method:", ["Camera", "Gallery"], horizontal=True)
-
+    if manual_site_input and is_location_valid:
+        input_mode = st.radio("Input Source:", ["Camera", "Gallery"], horizontal=True)
         if input_mode == "Camera":
-            img_file = st.camera_input("Capture Site Photo")
+            img_file = st.camera_input("Take Picture")
+            if img_file and not any(p.getvalue() == img_file.getvalue() for p in st.session_state["captured_photos"]):
+                st.session_state["captured_photos"].append(img_file)
 
-            if img_file is not None:
-                img_bytes = img_file.getvalue()
-                if not any(p.getvalue() == img_bytes for p in st.session_state["captured_photos"]):
-                    st.session_state["captured_photos"].append(img_file)
-
-            col_clear, col_count = st.columns([1, 4])
-            with col_clear:
-                if st.button("🗑️ Clear Photos"):
-                    st.session_state["captured_photos"] = []
-                    st.rerun()
+            if st.button("🗑️ Clear All"):
+                st.session_state["captured_photos"] = []
+                st.rerun()
 
             uploaded_files = st.session_state["captured_photos"]
-
         else:
-            img_files = st.file_uploader("Pick from gallery", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
+            img_files = st.file_uploader("Upload photos", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
             if img_files:
                 uploaded_files.extend(img_files)
 
         if uploaded_files:
-            st.write(f"Selected Photos ({len(uploaded_files)}):")
             cols = st.columns(6)
             for idx, file in enumerate(uploaded_files):
                 with cols[idx % 6]:
-                    st.image(file, width=120)
+                    st.image(file, width=80)
 
-    st.write("---")
-    if st.button("📤 Submit Site Audit & NTG Report", use_container_width=True, disabled=(not selected_site_code or not is_location_valid)):
+    if st.button("📤 Run Audit & Submit", use_container_width=True, disabled=(not manual_site_input or not is_location_valid)):
         if not uploaded_files:
-            st.warning("Please capture or upload at least one site photo.")
+            st.warning("Please attach at least one photo.")
         else:
             gemini_key = st.secrets.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
-
             if not gemini_key:
-                st.error("❌ Missing Gemini API Key! Configure `GEMINI_API_KEY` in Streamlit Secrets.")
+                st.error("Missing GEMINI_API_KEY!")
             else:
-                with st.spinner("🏷️ Analyzing Equipment & NTG Tagging Data..."):
+                with st.spinner("⚡ Processing Audit..."):
                     try:
-                        barcodes_found = scan_equipment_barcodes(uploaded_files)
-                        if barcodes_found:
-                            st.markdown("#### 🏷️ Scanned Barcodes & Asset Labels")
-                            st.dataframe(pd.DataFrame(barcodes_found), use_container_width=True)
-                            barcode_summary = "\n".join([f"- [{b['Photo']}] ({b['Type']}) Serial: {b['Barcode / Serial']}" for b in barcodes_found])
-                        else:
-                            barcode_summary = "No machine-readable 1D/2D barcodes extracted by CV. Read human-printed NTG tags and labels directly from the photos."
-
                         client = genai.Client(api_key=gemini_key)
-                        
                         pil_images = [optimize_image(f) for f in uploaded_files]
 
                         SYSTEM_PROMPT = """
-You are a highly precise telecom site audit engineer performing a physical site inspection and NTG Asset Tagging Audit.
-
-CRITICAL DEFINITION OF NTG:
-- "NTG" refers strictly to the National Tagging system (asset labels, barcode tags, port wrap labels, and site identification plates) applied onto equipment.
-- NEVER refer to physical hardware, cabinets, BBU, or RHUB units as "NTG equipment" or "NTG cabinets".
-- Refer to hardware by its actual brand/type (e.g., Huawei RHUB, BlueStorm Cabinet, ODF, Battery Rack) and evaluate its NTG asset tagging status.
+You are a telecom audit engineer inspecting physical equipment and NTG Asset Tagging.
 
 MANDATORY OUTPUT FORMAT:
-You MUST follow this EXACT layout for every report. Do NOT change table headers or list styles. Ensure Section 1 is always a Markdown Table followed by individual photo breakdowns.
-
 ### 1. EQUIPMENT QUANTITY COUNT & AUDIT
 | Equipment / Asset Description | Identified Model / Brand | Quantities Detected | Status / Location |
 | :--- | :--- | :--- | :--- |
-(Fill rows here)
-
-(Add Photo-by-Photo Breakdown bullet points directly below the table)
 
 ### 2. NTG ASSET TAGGING & BARCODE VERIFICATION
-* **Equipment Identifiers:** (Describe NTG tagging, ASIACELL tags, branding, or barcodes on the hardware enclosures).
-* **Cable & Port Labels:** (Describe port tags, e.g., PRRU, RHUB wrapped NTG labels).
-* **Barcode / QR Status:** (State if any 1D/2D barcodes are visible).
+* **Equipment Identifiers:** Describe NTG tags and asset labels.
+* **Cable & Port Labels:** Describe port labels/tags.
 
-### 3. INSTALLATION QUALITY & CABLING
-* **Mounting & Physical Integrity:** (Describe how hardware is mounted and secured).
-* **Cable Routing & Management:** (Describe fiber jumpers, pRRU cables, slack loops).
-* **Grounding:** (Describe earth connections if visible).
-
-### 4. FINAL VERDICT & DEFECTS
+### 3. FINAL VERDICT & DEFECTS
 * **Final Verdict:** [PASS / PASS WITH CONCERNS / FAIL]
-* **Identified Defects (Including Housekeeping):** (Thoroughly inspect the TOP SURFACE of all telecom enclosures. Look for water bottles, plastic cups, food trash, or unanchored items. If ANY foreign object/liquid is on top of or near hardware, it is a FAIL).
-* **Mandatory Corrective Actions:** (List precise instructions to fix defects).
+* **Identified Defects:** Note trash, loose cables, or unanchored items.
+* **Corrective Actions:** Remediation steps.
 """
-
-                        user_prompt = f"""
-Site ID: {selected_site_code}
-Technician: {tech_name_input or 'Unassigned'}
-Total Photos Attached: {len(pil_images)}
-
-Auto-Scanned Barcodes/Asset Labels:
-{barcode_summary}
-
-IMPORTANT MULTI-PHOTO INSTRUCTIONS:
-1. Examine each of the {len(pil_images)} uploaded photos step-by-step.
-2. Determine if the photos depict multiple distinct physical racks or different angles/views of the SAME rack. Deduplicate physical asset counts in Section 1.
-3. In Section 1, list total unique physical assets detected across all photos, and add bullet points detailing what is shown in Photo #1, Photo #2, and Photo #3.
-"""
-
-                        gen_config = types.GenerateContentConfig(
-                            system_instruction=SYSTEM_PROMPT,
-                            temperature=0.0,
-                            top_p=0.95
-                        )
 
                         report_text = generate_gemini_content_robust(
                             client=client,
-                            contents=[user_prompt, *pil_images],
-                            config=gen_config
+                            contents=[f"Site ID: {manual_site_input}\nTechnician: {tech_name_input or 'Unassigned'}", *pil_images],
+                            config=types.GenerateContentConfig(system_instruction=SYSTEM_PROMPT, temperature=0.0)
                         )
 
                         if report_text:
-                            status_verdict = "PASS"
-                            if "FAIL" in report_text.upper():
-                                status_verdict = "FAIL"
-                            elif "CONCERNS" in report_text.upper():
-                                status_verdict = "PASS WITH CONCERNS"
-
-                            st.subheader("📋 Equipment Audit & NTG Tagging Report")
+                            st.subheader("📋 Audit Report")
                             st.markdown(report_text)
-
-                            if save_report_to_supabase(selected_site_code, tech_name_input or 'Unassigned', status_verdict, report_text, user_lat, user_lon):
-                                st.success(f"✅ Audit report for Site **{selected_site_code}** successfully submitted to supervisor!")
+                            
+                            status_verdict = "FAIL" if "FAIL" in report_text.upper() else ("PASS WITH CONCERNS" if "CONCERNS" in report_text.upper() else "PASS")
+                            if save_report_to_supabase(manual_site_input, tech_name_input or 'Unassigned', status_verdict, report_text, user_lat, user_lon):
+                                st.success("✅ Audit logged successfully!")
                                 st.session_state["captured_photos"] = []
-
-                    except APIError as e:
-                        st.error(f"⚠️ Gemini API Error: {str(e)}")
                     except Exception as e:
-                        st.error(f"⚠️ Audit submission failed: {str(e)}")
+                        st.error(f"Audit processing failed: {str(e)}")
 
 # ---------------------------------------------------------
-# TAB 2: PM Report Analyzer (Multi-PDF Support & Analytics)
+# TAB 2: Multi-PM Analyzer (Fast PDF Upload & Processing)
 # ---------------------------------------------------------
 with tab_pm:
-    st.subheader("📄 Multi-PDF Preventive Maintenance (PM) Audit & Analytics")
-    st.markdown("Upload multiple vendor or subcontractor PM checksheets (PDF) to automatically generate summary analytics, site-by-site remark breakdowns, and supervisor action notes.")
-
-    uploaded_pdfs = st.file_uploader("Upload PM Reports (PDF)", type=["pdf"], accept_multiple_files=True)
+    st.subheader("📄 PM Checksheet Analyzer")
+    uploaded_pdfs = st.file_uploader("Upload PM PDFs", type=["pdf"], accept_multiple_files=True)
 
     if uploaded_pdfs:
-        st.info(f"📁 Total Files Selected: **{len(uploaded_pdfs)}**")
-        
-        if st.button("🚀 Process & Analyze All PM Reports", use_container_width=True):
-            gemini_key = st.secrets.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
+        st.caption(f"Files selected: **{len(uploaded_pdfs)}**")
 
+        if st.button("🚀 Fast Process All PDFs", use_container_width=True):
+            gemini_key = st.secrets.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
             if not gemini_key:
-                st.error("❌ Missing Gemini API Key! Configure `GEMINI_API_KEY` in Streamlit Secrets.")
+                st.error("Missing Gemini API Key!")
             else:
                 client = genai.Client(api_key=gemini_key)
                 all_site_data = []
 
-                # System Prompt for Structured Extraction per PDF
                 BATCH_SYSTEM_PROMPT = """
-You are a senior telecommunications cluster supervisor auditing Preventive Maintenance (PM) reports.
-Analyze the provided PM text carefully and extract key operational and technical status indicators.
-
-You MUST respond strictly in valid JSON format matching this schema:
+You are a telecom supervisor auditing PM reports. Extract key indicators strictly in valid JSON format:
 {
-  "site_id": "Extracted Site ID or Unknown",
-  "vendor_technician": "Vendor / Tech Name or Unknown",
-  "pm_date": "YYYY-MM-DD or Unknown",
+  "site_id": "Extracted Site ID",
+  "vendor_technician": "Technician Name",
+  "pm_date": "YYYY-MM-DD",
   "verdict": "APPROVED" | "APPROVED WITH CONCERNS" | "REJECTED",
-  "critical_remarks": [
-    "List key physical/technical observations, failed checks, or parameter anomalies (e.g., low battery runtime, poor VSWR, high ambient temp, generator oil leak)"
-  ],
-  "supervisor_focus_notes": [
-    "List exact action items, replacement recommendations, or field follow-ups required for the cluster team"
-  ]
+  "critical_remarks": ["Key observations or failures"],
+  "supervisor_focus_notes": ["Action items required"]
 }
 """
 
-                progress_bar = st.progress(0)
+                progress = st.progress(0)
                 status_text = st.empty()
 
-                for idx, pdf_file in enumerate(uploaded_pdfs):
-                    status_text.text(f"Processing ({idx+1}/{len(uploaded_pdfs)}): {pdf_file.name}...")
-                    extracted_text = extract_text_from_pdf(pdf_file)
-
-                    if extracted_text:
-                        user_prompt = f"FILENAME: {pdf_file.name}\n\nDOCUMENT TEXT:\n{extracted_text}"
-                        
+                for idx, pdf in enumerate(uploaded_pdfs):
+                    status_text.text(f"⚡ Processing ({idx+1}/{len(uploaded_pdfs)}): {pdf.name}")
+                    
+                    # Clean and compress text to minimize API payload size and speed up uploads
+                    cleaned_text = extract_and_clean_pdf_text(pdf)
+                    
+                    if cleaned_text:
+                        user_prompt = f"FILENAME: {pdf.name}\n\nTEXT:\n{cleaned_text}"
                         gen_config = types.GenerateContentConfig(
                             system_instruction=BATCH_SYSTEM_PROMPT,
                             temperature=0.0,
+                            max_output_tokens=350,
                             response_mime_type="application/json"
                         )
 
@@ -673,143 +455,49 @@ You MUST respond strictly in valid JSON format matching this schema:
                                 contents=[user_prompt],
                                 config=gen_config
                             )
-                            
-                            parsed_res = json.loads(json_response)
-                            parsed_res["filename"] = pdf_file.name
-                            all_site_data.append(parsed_res)
-
+                            parsed = json.loads(json_response)
+                            parsed["filename"] = pdf.name
+                            all_site_data.append(parsed)
                         except Exception as e:
                             all_site_data.append({
-                                "filename": pdf_file.name,
+                                "filename": pdf.name,
                                 "site_id": "ERROR",
-                                "vendor_technician": "N/A",
-                                "pm_date": "N/A",
                                 "verdict": "REJECTED",
                                 "critical_remarks": [f"Parsing error: {str(e)}"],
-                                "supervisor_focus_notes": ["Re-upload document or inspect manually."]
+                                "supervisor_focus_notes": ["Re-check document"]
                             })
                     else:
                         all_site_data.append({
-                            "filename": pdf_file.name,
+                            "filename": pdf.name,
                             "site_id": "EMPTY",
-                            "vendor_technician": "N/A",
-                            "pm_date": "N/A",
                             "verdict": "REJECTED",
-                            "critical_remarks": ["No readable text extracted from PDF."],
-                            "supervisor_focus_notes": ["Check if PDF is scanned as an image."]
+                            "critical_remarks": ["No readable text extracted."],
+                            "supervisor_focus_notes": ["Verify if PDF is an image scan."]
                         })
 
-                    progress_bar.progress((idx + 1) / len(uploaded_pdfs))
+                    progress.progress((idx + 1) / len(uploaded_pdfs))
 
-                status_text.success("✅ Multi-PM Report Processing Completed!")
+                status_text.success("✅ Batch processing completed!")
                 st.session_state["pm_analysis_results"] = all_site_data
 
-    # Display Analytics Dashboard and Breakdown if Data Exists
     if "pm_analysis_results" in st.session_state and st.session_state["pm_analysis_results"]:
         results = st.session_state["pm_analysis_results"]
+        st.markdown("### 📋 PM Analysis Summary")
         
-        st.write("---")
-        st.subheader("📊 Cluster Executive Statistics")
-
-        # Metric KPI Cards
-        total_sites = len(results)
-        approved_cnt = sum(1 for r in results if r.get("verdict") == "APPROVED")
-        concerns_cnt = sum(1 for r in results if r.get("verdict") == "APPROVED WITH CONCERNS")
-        rejected_cnt = sum(1 for r in results if r.get("verdict") == "REJECTED")
-
-        kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-        kpi1.metric("Total Audited Sites", total_sites)
-        kpi2.metric("Approved", approved_cnt, delta=f"{(approved_cnt/total_sites)*100:.0f}%" if total_sites else "0%")
-        kpi3.metric("Pass w/ Concerns", concerns_cnt, delta_color="normal")
-        kpi4.metric("Rejected / Defects", rejected_cnt, delta=f"-{(rejected_cnt/total_sites)*100:.0f}%" if rejected_cnt and total_sites else "0", delta_color="inverse")
-
-        # Tabular Summary Overview
-        st.markdown("### 📋 Executive PM Audit Summary")
-        
-        summary_rows = []
-        for r in results:
-            summary_rows.append({
-                "Site ID": r.get("site_id", "N/A"),
-                "Vendor/Tech": r.get("vendor_technician", "N/A"),
-                "Date": r.get("pm_date", "N/A"),
-                "Verdict": r.get("verdict", "N/A"),
-                "Critical Remarks": " | ".join(r.get("critical_remarks", [])),
-                "Focus Actions": " | ".join(r.get("supervisor_focus_notes", [])),
-                "File": r.get("filename", "")
-            })
+        summary_rows = [{
+            "Site ID": r.get("site_id", "N/A"),
+            "Verdict": r.get("verdict", "N/A"),
+            "Critical Remarks": " | ".join(r.get("critical_remarks", [])),
+            "Focus Actions": " | ".join(r.get("supervisor_focus_notes", [])),
+            "File": r.get("filename", "")
+        } for r in results]
         
         df_summary = pd.DataFrame(summary_rows)
         st.dataframe(df_summary, use_container_width=True)
 
-        # Download Excel Export
-        excel_data = convert_df_to_excel(df_summary, sheet_name='PM_Audit_Summary')
-
         st.download_button(
-            label="📥 Download Multi-PM Analysis Summary (.xlsx)",
-            data=excel_data,
-            file_name="Multi_PM_Audit_Summary.xlsx",
+            label="📥 Download Summary Excel (.xlsx)",
+            data=convert_df_to_excel(df_summary, sheet_name='PM_Summary'),
+            file_name="PM_Summary.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
-
-        st.write("---")
-        st.subheader("🔍 Detailed Site-by-Site Remarks & Focus Notes")
-
-        # Site-by-site filter / inspection expanders
-        focus_filter = st.selectbox(
-            "Filter Sites by Verdict:", 
-            ["ALL", "REJECTED", "APPROVED WITH CONCERNS", "APPROVED"]
-        )
-
-        for site_info in results:
-            if focus_filter != "ALL" and site_info.get("verdict") != focus_filter:
-                continue
-
-            v_status = site_info.get("verdict", "REJECTED")
-            verdict_icon = "🟢" if v_status == "APPROVED" else ("🟡" if "CONCERNS" in v_status else "🔴")
-            
-            with st.expander(f"{verdict_icon} **Site ID: {site_info.get('site_id', 'Unknown')}** | Status: **{v_status}** ({site_info.get('filename')})"):
-                col_left, col_right = st.columns(2)
-
-                with col_left:
-                    st.markdown("#### 📝 Key Technical Remarks & Findings")
-                    remarks = site_info.get("critical_remarks", [])
-                    if remarks:
-                        for rem in remarks:
-                            st.markdown(f"- {rem}")
-                    else:
-                        st.write("No specific technical remarks detected.")
-
-                with col_right:
-                    st.markdown("#### 🎯 Supervisor Action & Focus Notes")
-                    notes = site_info.get("supervisor_focus_notes", [])
-                    if notes:
-                        for note in notes:
-                            st.markdown(f"👉 **{note}**")
-                    else:
-                        st.write("No specific follow-up items flagged.")
-
-# ---------------------------------------------------------
-# TAB 3: Admin Remote Dashboard
-# ---------------------------------------------------------
-if logged_user == "admin" and tab_reports is not None:
-    with tab_reports:
-        st.subheader("📊 Remote Site Audit Log (Supabase Database)")
-        
-        if st.button("🔄 Refresh Data"):
-            st.rerun()
-
-        df_reports = fetch_supabase_reports()
-
-        if not df_reports.empty:
-            st.dataframe(df_reports[['created_at', 'site_id', 'technician', 'coordinates', 'status', 'report_text']], use_container_width=True)
-            
-            excel_data = convert_df_to_excel(df_reports[['created_at', 'site_id', 'technician', 'coordinates', 'status', 'report_text']], sheet_name='Audit_Reports')
-            
-            st.download_button(
-                label="📊 Download Audit History (Excel .xlsx)",
-                data=excel_data,
-                file_name="site_audit_reports.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-        else:
-            st.info("No remote records found in the database yet.")
