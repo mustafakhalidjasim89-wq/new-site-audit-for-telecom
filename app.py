@@ -3,6 +3,7 @@ import os
 import io
 import time
 import re
+import json
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -73,7 +74,7 @@ def extract_text_from_pdf(pdf_file):
                 text += extracted + "\n"
         return text
     except Exception as e:
-        st.error(f"Error reading PDF file: {str(e)}")
+        st.error(f"Error reading PDF file ({pdf_file.name}): {str(e)}")
         return None
 
 # ---------------------------------------------------------
@@ -220,10 +221,10 @@ def fetch_supabase_reports():
 # ---------------------------------------------------------
 # Helper: Convert DataFrame to Excel Binary Buffer
 # ---------------------------------------------------------
-def convert_df_to_excel(df):
+def convert_df_to_excel(df, sheet_name='Audit_Reports'):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False, sheet_name='Audit_Reports')
+        df.to_excel(writer, index=False, sheet_name=sheet_name)
     output.seek(0)
     return output.getvalue()
 
@@ -252,7 +253,7 @@ def generate_gemini_content_robust(client, contents, config):
         candidate_models.append(configured_model)
     
     # Active latest models
-    candidate_models.extend(["gemini-3.6-flash", "gemini-2.5-flash"])
+    candidate_models.extend(["gemini-2.5-flash", "gemini-1.5-flash"])
     
     # Remove duplicates while preserving order
     seen = set()
@@ -610,79 +611,182 @@ IMPORTANT MULTI-PHOTO INSTRUCTIONS:
                         st.error(f"⚠️ Audit submission failed: {str(e)}")
 
 # ---------------------------------------------------------
-# TAB 2: PM Report Analyzer (PDF)
+# TAB 2: PM Report Analyzer (Multi-PDF Support & Analytics)
 # ---------------------------------------------------------
 with tab_pm:
-    st.subheader("📄 Automated Preventive Maintenance (PM) PDF Audit")
-    st.markdown("Upload vendor or subcontractor PM checksheets (PDF) to perform AI metric extraction and validation.")
+    st.subheader("📄 Multi-PDF Preventive Maintenance (PM) Audit & Analytics")
+    st.markdown("Upload multiple vendor or subcontractor PM checksheets (PDF) to automatically generate summary analytics, site-by-site remark breakdowns, and supervisor action notes.")
 
-    uploaded_pdf = st.file_uploader("Upload PM Report (PDF)", type=["pdf"])
+    uploaded_pdfs = st.file_uploader("Upload PM Reports (PDF)", type=["pdf"], accept_multiple_files=True)
 
-    if uploaded_pdf is not None:
-        with st.spinner("📖 Extracting text from PM document..."):
-            extracted_pm_text = extract_text_from_pdf(uploaded_pdf)
+    if uploaded_pdfs:
+        st.info(f"📁 Total Files Selected: **{len(uploaded_pdfs)}**")
+        
+        if st.button("🚀 Process & Analyze All PM Reports", use_container_width=True):
+            gemini_key = st.secrets.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
 
-        if extracted_pm_text:
-            st.success(f"Successfully extracted {len(extracted_pm_text)} characters from **{uploaded_pdf.name}**.")
-            
-            with st.expander("👁️ View Extracted Document Text"):
-                st.text_area("PDF Content", extracted_pm_text, height=200)
+            if not gemini_key:
+                st.error("❌ Missing Gemini API Key! Configure `GEMINI_API_KEY` in Streamlit Secrets.")
+            else:
+                client = genai.Client(api_key=gemini_key)
+                all_site_data = []
 
-            if st.button("🤖 Analyze PM Report with AI", use_container_width=True):
-                gemini_key = st.secrets.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
+                # System Prompt for Structured Extraction per PDF
+                BATCH_SYSTEM_PROMPT = """
+You are a senior telecommunications cluster supervisor auditing Preventive Maintenance (PM) reports.
+Analyze the provided PM text carefully and extract key operational and technical status indicators.
 
-                if not gemini_key:
-                    st.error("❌ Missing Gemini API Key! Configure `GEMINI_API_KEY` in Streamlit Secrets.")
-                else:
-                    with st.spinner("🔬 Running PM Audit & Health Checks..."):
+You MUST respond strictly in valid JSON format matching this schema:
+{
+  "site_id": "Extracted Site ID or Unknown",
+  "vendor_technician": "Vendor / Tech Name or Unknown",
+  "pm_date": "YYYY-MM-DD or Unknown",
+  "verdict": "APPROVED" | "APPROVED WITH CONCERNS" | "REJECTED",
+  "critical_remarks": [
+    "List key physical/technical observations, failed checks, or parameter anomalies (e.g., low battery runtime, poor VSWR, high ambient temp, generator oil leak)"
+  ],
+  "supervisor_focus_notes": [
+    "List exact action items, replacement recommendations, or field follow-ups required for the cluster team"
+  ]
+}
+"""
+
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+
+                for idx, pdf_file in enumerate(uploaded_pdfs):
+                    status_text.text(f"Processing ({idx+1}/{len(uploaded_pdfs)}): {pdf_file.name}...")
+                    extracted_text = extract_text_from_pdf(pdf_file)
+
+                    if extracted_text:
+                        user_prompt = f"FILENAME: {pdf_file.name}\n\nDOCUMENT TEXT:\n{extracted_text}"
+                        
+                        gen_config = types.GenerateContentConfig(
+                            system_instruction=BATCH_SYSTEM_PROMPT,
+                            temperature=0.0,
+                            response_mime_type="application/json"
+                        )
+
                         try:
-                            client = genai.Client(api_key=gemini_key)
-
-                            pm_prompt = f"""
-You are a senior telecommunications cluster supervisor conducting a Quality Audit on a Preventive Maintenance (PM) report.
-
-Review the following PM Report text carefully and generate a structured technical evaluation:
-
-1. **SITE IDENTIFICATION & DATES**:
-   - Site Code / Name
-   - Maintenance Date & Maintenance Team / Vendor Name
-
-2. **POWER & ENVIRONMENT METRICS CHECK**:
-   - Commercial Power / Grid status & AC Voltage levels.
-   - Rectifier DC Output Voltage (-48V DC nominal check), Rectifier module load current.
-   - Generator Operating Hours, Oil Level, Fuel Level, Battery Voltage.
-   - Air Conditioner operational status and room ambient temperature.
-
-3. **RAN & TRANSMISSION HEALTH**:
-   - Antenna alignment / Tilt check status.
-   - Fiber / Feeder cable inspection and VSWR check status.
-   - Microwave Link alignment, RSL (Received Signal Level) values, ODU status.
-
-4. **MAINTENANCE DEFECTS & MISSING ITEMS**:
-   - Highlight any failed inspection items, missing parameters, or improper maintenance work.
-
-5. **SUPERVISOR AUDIT VERDICT**:
-   - **APPROVED**, **APPROVED WITH ACTION ITEMS**, or **REJECTED**.
-   - List required corrective actions if any defects are identified.
-
----
-PM REPORT DOCUMENT TEXT:
-{extracted_pm_text}
-                            """
-
-                            gen_config = types.GenerateContentConfig(temperature=0.0)
-
-                            pm_report_result = generate_gemini_content_robust(
+                            json_response = generate_gemini_content_robust(
                                 client=client,
-                                contents=[pm_prompt],
+                                contents=[user_prompt],
                                 config=gen_config
                             )
-
-                            st.markdown("### 📊 AI Preventive Maintenance Analysis Report")
-                            st.markdown(pm_report_result)
+                            
+                            parsed_res = json.loads(json_response)
+                            parsed_res["filename"] = pdf_file.name
+                            all_site_data.append(parsed_res)
 
                         except Exception as e:
-                            st.error(f"⚠️ PM Analysis failed: {str(e)}")
+                            all_site_data.append({
+                                "filename": pdf_file.name,
+                                "site_id": "ERROR",
+                                "vendor_technician": "N/A",
+                                "pm_date": "N/A",
+                                "verdict": "REJECTED",
+                                "critical_remarks": [f"Parsing error: {str(e)}"],
+                                "supervisor_focus_notes": ["Re-upload document or inspect manually."]
+                            })
+                    else:
+                        all_site_data.append({
+                            "filename": pdf_file.name,
+                            "site_id": "EMPTY",
+                            "vendor_technician": "N/A",
+                            "pm_date": "N/A",
+                            "verdict": "REJECTED",
+                            "critical_remarks": ["No readable text extracted from PDF."],
+                            "supervisor_focus_notes": ["Check if PDF is scanned as an image."]
+                        })
+
+                    progress_bar.progress((idx + 1) / len(uploaded_pdfs))
+
+                status_text.success("✅ Multi-PM Report Processing Completed!")
+                st.session_state["pm_analysis_results"] = all_site_data
+
+    # Display Analytics Dashboard and Breakdown if Data Exists
+    if "pm_analysis_results" in st.session_state and st.session_state["pm_analysis_results"]:
+        results = st.session_state["pm_analysis_results"]
+        
+        st.write("---")
+        st.subheader("📊 Cluster Executive Statistics")
+
+        # Metric KPI Cards
+        total_sites = len(results)
+        approved_cnt = sum(1 for r in results if r.get("verdict") == "APPROVED")
+        concerns_cnt = sum(1 for r in results if r.get("verdict") == "APPROVED WITH CONCERNS")
+        rejected_cnt = sum(1 for r in results if r.get("verdict") == "REJECTED")
+
+        kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+        kpi1.metric("Total Audited Sites", total_sites)
+        kpi2.metric("Approved", approved_cnt, delta=f"{(approved_cnt/total_sites)*100:.0f}%" if total_sites else "0%")
+        kpi3.metric("Pass w/ Concerns", concerns_cnt, delta_color="normal")
+        kpi4.metric("Rejected / Defects", rejected_cnt, delta=f"-{(rejected_cnt/total_sites)*100:.0f}%" if rejected_cnt and total_sites else "0", delta_color="inverse")
+
+        # Tabular Summary Overview
+        st.markdown("### 📋 Executive PM Audit Summary")
+        
+        summary_rows = []
+        for r in results:
+            summary_rows.append({
+                "Site ID": r.get("site_id", "N/A"),
+                "Vendor/Tech": r.get("vendor_technician", "N/A"),
+                "Date": r.get("pm_date", "N/A"),
+                "Verdict": r.get("verdict", "N/A"),
+                "Critical Remarks": " | ".join(r.get("critical_remarks", [])),
+                "Focus Actions": " | ".join(r.get("supervisor_focus_notes", [])),
+                "File": r.get("filename", "")
+            })
+        
+        df_summary = pd.DataFrame(summary_rows)
+        st.dataframe(df_summary, use_container_width=True)
+
+        # Download Excel Export
+        excel_data = convert_df_to_excel(df_summary, sheet_name='PM_Audit_Summary')
+
+        st.download_button(
+            label="📥 Download Multi-PM Analysis Summary (.xlsx)",
+            data=excel_data,
+            file_name="Multi_PM_Audit_Summary.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+        st.write("---")
+        st.subheader("🔍 Detailed Site-by-Site Remarks & Focus Notes")
+
+        # Site-by-site filter / inspection expanders
+        focus_filter = st.selectbox(
+            "Filter Sites by Verdict:", 
+            ["ALL", "REJECTED", "APPROVED WITH CONCERNS", "APPROVED"]
+        )
+
+        for site_info in results:
+            if focus_filter != "ALL" and site_info.get("verdict") != focus_filter:
+                continue
+
+            v_status = site_info.get("verdict", "REJECTED")
+            verdict_icon = "🟢" if v_status == "APPROVED" else ("🟡" if "CONCERNS" in v_status else "🔴")
+            
+            with st.expander(f"{verdict_icon} **Site ID: {site_info.get('site_id', 'Unknown')}** | Status: **{v_status}** ({site_info.get('filename')})"):
+                col_left, col_right = st.columns(2)
+
+                with col_left:
+                    st.markdown("#### 📝 Key Technical Remarks & Findings")
+                    remarks = site_info.get("critical_remarks", [])
+                    if remarks:
+                        for rem in remarks:
+                            st.markdown(f"- {rem}")
+                    else:
+                        st.write("No specific technical remarks detected.")
+
+                with col_right:
+                    st.markdown("#### 🎯 Supervisor Action & Focus Notes")
+                    notes = site_info.get("supervisor_focus_notes", [])
+                    if notes:
+                        for note in notes:
+                            st.markdown(f"👉 **{note}**")
+                    else:
+                        st.write("No specific follow-up items flagged.")
 
 # ---------------------------------------------------------
 # TAB 3: Admin Remote Dashboard
@@ -699,7 +803,7 @@ if logged_user == "admin" and tab_reports is not None:
         if not df_reports.empty:
             st.dataframe(df_reports[['created_at', 'site_id', 'technician', 'coordinates', 'status', 'report_text']], use_container_width=True)
             
-            excel_data = convert_df_to_excel(df_reports[['created_at', 'site_id', 'technician', 'coordinates', 'status', 'report_text']])
+            excel_data = convert_df_to_excel(df_reports[['created_at', 'site_id', 'technician', 'coordinates', 'status', 'report_text']], sheet_name='Audit_Reports')
             
             st.download_button(
                 label="📊 Download Audit History (Excel .xlsx)",
