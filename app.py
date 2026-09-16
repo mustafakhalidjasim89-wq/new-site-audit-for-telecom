@@ -164,7 +164,7 @@ def calculate_distance_km(lat1, lon1, lat2, lon2):
         return float('inf')
 
 # ---------------------------------------------------------
-# Helper: Robust Gemini Generation with Active Latest Models
+# Helper: Robust Gemini Generation with Active Models
 # ---------------------------------------------------------
 def generate_gemini_content_robust(client, contents, config):
     configured_model = st.secrets.get("GEMINI_MODEL") or os.environ.get("GEMINI_MODEL")
@@ -173,8 +173,8 @@ def generate_gemini_content_robust(client, contents, config):
     if configured_model:
         candidate_models.append(configured_model)
     
-    # Active latest models
-    candidate_models.extend(["gemini-3.6-flash", "gemini-2.5-flash"])
+    # Active supported models
+    candidate_models.extend(["gemini-3.6-flash", "gemini-1.5-flash", "gemini-1.5-pro"])
     
     # Remove duplicates while preserving order
     seen = set()
@@ -194,7 +194,7 @@ def generate_gemini_content_robust(client, contents, config):
             if "404" in str(api_err) or "NOT_FOUND" in str(api_err):
                 continue
             elif "429" in str(api_err) or "RESOURCE_EXHAUSTED" in str(api_err):
-                time.sleep(5)
+                time.sleep(3)
     raise last_error
 
 # ---------------------------------------------------------
