@@ -69,7 +69,7 @@ def optimize_image(uploaded_file, max_size=(800, 800), quality=75):
 # ---------------------------------------------------------
 # Helper: PDF Text & Resized Image Extractor
 # ---------------------------------------------------------
-def process_and_resize_pdf(pdf_file, max_chars=3500, target_dpi=100, max_size=(800, 800)):
+def process_and_resize_pdf(pdf_file, max_chars=5000, target_dpi=100, max_size=(800, 800)):
     """
     Extracts text and converts scanned PDF pages into downscaled JPEG images.
     Drastically decreases payload size and execution latency.
@@ -143,10 +143,13 @@ def parse_gemini_json(raw_text):
     # 4. Attempt tail-repair for truncated strings or missing brackets
     try:
         repaired = cleaned.strip()
+        # Fix trailing commas inside arrays or objects before closing
+        repaired = re.sub(r',\s*([\]}])', r'\1', repaired)
         if not repaired.endswith("}"):
-            if not repaired.endswith('"'):
+            if not repaired.endswith('"') and not repaired.endswith(']'):
                 repaired += '"'
-            repaired += "\n}"
+            if not repaired.endswith("}"):
+                repaired += "\n}"
         return json.loads(repaired)
     except Exception:
         raise ValueError(f"Unparseable output from model: {raw_text[:120]}...")
@@ -478,7 +481,7 @@ STRICT DIESEL GENERATOR (DG) AUDIT RULES:
 1. DIESEL GENERATOR (DG) PHOTO & SCREEN MANDATE:
    - Mandatory DG photo evidence includes: (a) Overall DG unit image, (b) DG LED Controller Display Screen photo showing running hours, and (c) Specific DG running hours numerical value in the text.
    - IF ANY OF THESE ARE MISSING OR UNCLEAR:
-     * Explicitly list missing items in `missing_equipment_photos` (e.g. "DG overall photo missing", "DG LED screen photo missing", "DG running hours unrecorded").
+     * Explicitly list missing items in `missing_equipment_photos` (e.g., "DG overall photo missing", "DG LED screen photo missing", "DG running hours unrecorded").
      * State clearly in `critical_remarks`: "Site without DG / DG evidence missing - Mandatory DG photo, LED screen image, and running hours required".
      * Set the `verdict` to "REJECTED" or "APPROVED WITH CONCERNS".
 
@@ -513,13 +516,13 @@ Return strictly valid JSON matching this structure:
                     
                     payload = [f"FILENAME: {pdf_file.name}\nEXTRACTED TEXT:\n{text_content}"]
                     if resized_page_images:
-                        payload.extend(resized_page_images[:3])  # Send top 3 downscaled pages
+                        payload.extend(resized_page_images[:5])  # Send top 5 downscaled pages to capture complete evidence
 
-                    # Set max_output_tokens to 1024 to prevent JSON output truncation
+                    # Increased max_output_tokens to 2048 to prevent JSON output truncation crashes
                     gen_config = types.GenerateContentConfig(
                         system_instruction=BATCH_SYSTEM_PROMPT,
                         temperature=0.0,
-                        max_output_tokens=1024,
+                        max_output_tokens=2048,
                         response_mime_type="application/json"
                     )
 
