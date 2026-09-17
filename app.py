@@ -166,7 +166,7 @@ def calculate_distance_km(lat1, lon1, lat2, lon2):
         return float('inf')
 
 # ---------------------------------------------------------
-# Helper: Robust Gemini Generation with Updated Model Engines
+# Helper: Dynamic Model Selection and Generation
 # ---------------------------------------------------------
 def generate_gemini_content_robust(client, contents, config):
     configured_model = st.secrets.get("GEMINI_MODEL") or os.environ.get("GEMINI_MODEL")
@@ -175,8 +175,8 @@ def generate_gemini_content_robust(client, contents, config):
     if configured_model:
         candidate_models.append(configured_model)
     
-    # Active current model targets
-    candidate_models.extend(["gemini-3.1-pro-preview", "gemini-2.5-flash"])
+    # Priority active models based on the latest API specifications
+    candidate_models.extend(["gemini-3.6-flash", "gemini-3.1-pro-preview", "gemini-2.5-flash"])
     
     seen = set()
     models_to_try = [m for m in candidate_models if not (m in seen or seen.add(m))]
@@ -197,6 +197,24 @@ def generate_gemini_content_robust(client, contents, config):
                 continue
             elif "429" in err_msg or "resource_exhausted" in err_msg:
                 time.sleep(3)
+
+    # Fallback: Dynamically query available models if explicit candidate list fails
+    try:
+        for m in client.models.list():
+            if "generateContent" in getattr(m, "supported_generation_methods", []) or "flash" in m.name:
+                model_id = m.name.replace("models/", "")
+                try:
+                    response = client.models.generate_content(
+                        model=model_id,
+                        contents=contents,
+                        config=config
+                    )
+                    return response.text
+                except Exception:
+                    continue
+    except Exception:
+        pass
+
     raise last_error
 
 # ---------------------------------------------------------
