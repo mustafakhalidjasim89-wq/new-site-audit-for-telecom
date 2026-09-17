@@ -69,7 +69,7 @@ def optimize_image(uploaded_file, max_size=(800, 800), quality=75):
 # ---------------------------------------------------------
 # Helper: PDF Text & Resized Image Extractor
 # ---------------------------------------------------------
-def process_and_resize_pdf(pdf_file, max_chars=5000, target_dpi=100, max_size=(800, 800)):
+def process_and_resize_pdf(pdf_file, max_chars=6000, target_dpi=100, max_size=(800, 800)):
     """
     Extracts text and converts scanned PDF pages into downscaled JPEG images.
     Drastically decreases payload size and execution latency.
@@ -166,7 +166,7 @@ def calculate_distance_km(lat1, lon1, lat2, lon2):
         return float('inf')
 
 # ---------------------------------------------------------
-# Helper: Robust Gemini Generation with Updated Active Models
+# Helper: Robust Gemini Generation with Updated Model Engines
 # ---------------------------------------------------------
 def generate_gemini_content_robust(client, contents, config):
     configured_model = st.secrets.get("GEMINI_MODEL") or os.environ.get("GEMINI_MODEL")
@@ -175,8 +175,8 @@ def generate_gemini_content_robust(client, contents, config):
     if configured_model:
         candidate_models.append(configured_model)
     
-    # Only use current active models
-    candidate_models.extend(["gemini-2.5-flash", "gemini-2.5-pro"])
+    # Active current model targets
+    candidate_models.extend(["gemini-3.1-pro-preview", "gemini-2.5-flash"])
     
     seen = set()
     models_to_try = [m for m in candidate_models if not (m in seen or seen.add(m))]
@@ -193,7 +193,7 @@ def generate_gemini_content_robust(client, contents, config):
         except Exception as err:
             last_error = err
             err_msg = str(err).lower()
-            if "404" in err_msg or "not_found" in err_msg:
+            if "404" in err_msg or "not_found" in err_msg or "no longer available" in err_msg:
                 continue
             elif "429" in err_msg or "resource_exhausted" in err_msg:
                 time.sleep(3)
@@ -505,9 +505,9 @@ Whenever relevant issues are observed in the text or photo attachments, prioriti
 5. NO DEFECTS FOUND:
    - If all check items, photo positions, and parameters are fully compliant, explicitly state "No issue".
 
-Return strictly valid JSON matching this structure:
+Return strictly concise, valid JSON matching this structure:
 {
-  "site_id": "Extracted Site ID",
+  "site_id": "Extracted Site ID (e.g., ANB3872)",
   "vendor_technician": "Technician Name",
   "pm_date": "YYYY-MM-DD",
   "verdict": "APPROVED" | "APPROVED WITH CONCERNS" | "REJECTED",
@@ -527,12 +527,12 @@ Return strictly valid JSON matching this structure:
                     
                     payload = [f"FILENAME: {pdf_file.name}\nEXTRACTED TEXT:\n{text_content}"]
                     if resized_page_images:
-                        payload.extend(resized_page_images[:5])
+                        payload.extend(resized_page_images[:4])
 
                     gen_config = types.GenerateContentConfig(
                         system_instruction=BATCH_SYSTEM_PROMPT,
                         temperature=0.0,
-                        max_output_tokens=2048,
+                        max_output_tokens=4096,
                         response_mime_type="application/json"
                     )
 
