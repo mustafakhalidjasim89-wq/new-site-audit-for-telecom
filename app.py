@@ -166,7 +166,7 @@ def calculate_distance_km(lat1, lon1, lat2, lon2):
         return float('inf')
 
 # ---------------------------------------------------------
-# Helper: Robust Gemini Generation with Active Models
+# Helper: Robust Gemini Generation with Updated Active Models
 # ---------------------------------------------------------
 def generate_gemini_content_robust(client, contents, config):
     configured_model = st.secrets.get("GEMINI_MODEL") or os.environ.get("GEMINI_MODEL")
@@ -175,7 +175,8 @@ def generate_gemini_content_robust(client, contents, config):
     if configured_model:
         candidate_models.append(configured_model)
     
-    candidate_models.extend(["gemini-2.5-flash", "gemini-1.5-flash", "gemini-1.5-pro"])
+    # Only use current active models
+    candidate_models.extend(["gemini-2.5-flash", "gemini-2.5-pro"])
     
     seen = set()
     models_to_try = [m for m in candidate_models if not (m in seen or seen.add(m))]
@@ -189,11 +190,12 @@ def generate_gemini_content_robust(client, contents, config):
                 config=config
             )
             return response.text
-        except APIError as api_err:
-            last_error = api_err
-            if "404" in str(api_err) or "NOT_FOUND" in str(api_err):
+        except Exception as err:
+            last_error = err
+            err_msg = str(err).lower()
+            if "404" in err_msg or "not_found" in err_msg:
                 continue
-            elif "429" in str(api_err) or "RESOURCE_EXHAUSTED" in str(api_err):
+            elif "429" in err_msg or "resource_exhausted" in err_msg:
                 time.sleep(3)
     raise last_error
 
