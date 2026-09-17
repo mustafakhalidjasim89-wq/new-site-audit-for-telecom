@@ -143,7 +143,6 @@ def parse_gemini_json(raw_text):
     # 4. Attempt tail-repair for truncated strings or missing brackets
     try:
         repaired = cleaned.strip()
-        # Fix trailing commas inside arrays or objects before closing
         repaired = re.sub(r',\s*([\]}])', r'\1', repaired)
         if not repaired.endswith("}"):
             if not repaired.endswith('"') and not repaired.endswith(']'):
@@ -176,10 +175,8 @@ def generate_gemini_content_robust(client, contents, config):
     if configured_model:
         candidate_models.append(configured_model)
     
-    # Active supported models
-    candidate_models.extend(["gemini-3.6-flash", "gemini-1.5-flash", "gemini-1.5-pro"])
+    candidate_models.extend(["gemini-2.5-flash", "gemini-1.5-flash", "gemini-1.5-pro"])
     
-    # Remove duplicates while preserving order
     seen = set()
     models_to_try = [m for m in candidate_models if not (m in seen or seen.add(m))]
 
@@ -477,21 +474,34 @@ with tab_pm:
 You are a senior telecom audit supervisor analyzing PM checksheets and attached site photos. 
 Examine ALL provided text and image pages carefully to extract accurate technical audit details.
 
-STRICT DIESEL GENERATOR (DG) AUDIT RULES:
-1. DIESEL GENERATOR (DG) PHOTO & SCREEN MANDATE:
-   - Mandatory DG photo evidence includes: (a) Overall DG unit image, (b) DG LED Controller Display Screen photo showing running hours, and (c) Specific DG running hours numerical value in the text.
-   - IF ANY OF THESE ARE MISSING OR UNCLEAR:
-     * Explicitly list missing items in `missing_equipment_photos` (e.g., "DG overall photo missing", "DG LED screen photo missing", "DG running hours unrecorded").
-     * State clearly in `critical_remarks`: "Site without DG / DG evidence missing - Mandatory DG photo, LED screen image, and running hours required".
-     * Set the `verdict` to "REJECTED" or "APPROVED WITH CONCERNS".
+STRICT FIELD INSPECTION & DEFECT DETECTION RULES:
+Whenever relevant issues are observed in the text or photo attachments, prioritize flagging these exact standard telecom defect statements in `critical_remarks` and `supervisor_focus_notes`:
 
-2. DIESEL GENERATOR REMARKS & DEFECT WARNINGS:
-   - RUNNING HOURS WARNING: Explicitly mention DG running hours value. Flag a WARNING if running hours are high or overdue for service.
-   - PHYSICAL DEFECTS: State if there are oil leaks, fuel leaks, broken canopy, loose wiring, low oil pressure, or active alarms.
-   - GENERAL SITE DEFECTS: Include other issues like trash/leaves inside compound, unanchored cabinets, or loose cabling.
+1. SITE ENVIRONMENT & CLEANLINESS:
+   - "Dry grass near the generator." / "Dry grass near the generator & cabinet." / "Dry grass near the generator & fuel tank."
+   - "Don’t remove the extra materials." / Extra trash/debris on-site.
 
-3. SUPERVISOR FOCUS NOTES:
-   - Give direct instructions to technician (e.g., "Re-upload clear DG photo and DG LED screen showing running hours", "Clean oil leakage under DG").
+2. CABLE ROUTING, TRAYS, AND CANOPIES:
+   - "Gas piping without cable trays"
+   - "Disorganized cables in commercial power boxes and cabinets." / "Cables are disorganized in the commercial power box & the cabinet."
+   - "PVC tray inside the cabinet without a cover." / "The PVC tray inside the ATS has not been covered."
+   - "The tray cover is not closed properly."
+   - "Cables routed outside the tray." / "Cables are outside the tray."
+   - "Cutting abandoned cables at the site."
+   - "Disorganized Feeder cables on the tower."
+
+3. TOWER & PHOTO ELEVATION COMPLIANCE:
+   - "The images of the items attached to the tower are unclear because the technician did not climb up to photograph them up close."
+   - "The image does not represent what is required."
+   - "The images are not in their correct positions." / "The images are not in their correct places."
+   - "The cabin doors and the power compartment are not open."
+
+4. DIESEL GENERATOR (DG) AUDIT RULES:
+   - Mandatory DG photos: (a) Overall DG unit, (b) DG LED Display Screen showing running hours, (c) Numerical running hours recorded.
+   - If missing: Flag "Site without DG / DG evidence missing - Mandatory DG photo, LED screen image, and running hours required".
+
+5. NO DEFECTS FOUND:
+   - If all check items, photo positions, and parameters are fully compliant, explicitly state "No issue".
 
 Return strictly valid JSON matching this structure:
 {
@@ -499,8 +509,8 @@ Return strictly valid JSON matching this structure:
   "vendor_technician": "Technician Name",
   "pm_date": "YYYY-MM-DD",
   "verdict": "APPROVED" | "APPROVED WITH CONCERNS" | "REJECTED",
-  "missing_equipment_photos": ["List missing or unclear photos e.g. DG Unit, DG LED Screen, Rectifier, Battery"],
-  "critical_remarks": ["Detailed specific remarks: DG running hours, DG oil leaks/defects, or 'Site without DG / DG evidence missing'"],
+  "missing_equipment_photos": ["List missing or unclear photos e.g. DG Unit, DG LED Screen, Tower Close-up"],
+  "critical_remarks": ["Detailed defect statements matching standard observation rules"],
   "supervisor_focus_notes": ["Specific corrective actions required from technician"]
 }
 """
@@ -511,14 +521,12 @@ Return strictly valid JSON matching this structure:
                 for idx, pdf_file in enumerate(uploaded_pdfs):
                     status_text.text(f"⚙️ Processing ({idx+1}/{len(uploaded_pdfs)}): {pdf_file.name}")
                     
-                    # Process text and extract downscaled page images
                     text_content, resized_page_images = process_and_resize_pdf(pdf_file)
                     
                     payload = [f"FILENAME: {pdf_file.name}\nEXTRACTED TEXT:\n{text_content}"]
                     if resized_page_images:
-                        payload.extend(resized_page_images[:5])  # Send top 5 downscaled pages to capture complete evidence
+                        payload.extend(resized_page_images[:5])
 
-                    # Increased max_output_tokens to 2048 to prevent JSON output truncation crashes
                     gen_config = types.GenerateContentConfig(
                         system_instruction=BATCH_SYSTEM_PROMPT,
                         temperature=0.0,
@@ -533,7 +541,6 @@ Return strictly valid JSON matching this structure:
                             config=gen_config
                         )
                         
-                        # Parse with robust JSON repair engine
                         parsed = parse_gemini_json(raw_response)
                         parsed["filename"] = pdf_file.name
                         all_site_data.append(parsed)
