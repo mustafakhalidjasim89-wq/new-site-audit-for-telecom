@@ -176,7 +176,7 @@ def generate_gemini_content_robust(client, contents, config):
         candidate_models.append(configured_model)
     
     # Priority active models based on the latest API specifications
-    candidate_models.extend(["gemini-3.6-flash", "gemini-3.1-pro-preview", "gemini-2.5-flash"])
+    candidate_models.extend(["gemini-2.5-flash", "gemini-2.5-pro", "gemini-1.5-flash"])
     
     seen = set()
     models_to_try = [m for m in candidate_models if not (m in seen or seen.add(m))]
@@ -425,10 +425,23 @@ with tab_audit:
                         SYSTEM_PROMPT = """
 You are a telecom audit engineer inspecting physical equipment, mandatory site assets, photo quality, and NTG Asset Tagging.
 
-MANDATORY AUDIT RULES FOR EQUIPMENT & PHOTO QUALITY:
-1. MANDATORY SITE EQUIPMENT CHECK: Verify presence and visual coverage of core site equipment: Diesel Generator (DG), Power Cabinet/Rectifiers, Battery Banks, Main Antenna/Tower structure, and Microwave units.
-2. MISSING OR UNCLEAR PHOTO COMPLIANCE: If any mandatory equipment (e.g., Diesel Generator (DG)) is not clearly visible in the uploaded images, or if a photo is blurry/dark/partially obstructed, you MUST explicitly flag it under "MISSING OR UNCLEAR EQUIPMENT PHOTOS".
-3. VERDICT RULE: If key mandatory items like DG or Rectifiers have NO clear photos attached, mark the Final Verdict as "PASS WITH CONCERNS" or "FAIL".
+FIELD QUALITY & AUDIT COMPLIANCE DIRECTIVES:
+1. TOWER ELEVATION & PHOTO COMPLIANCE:
+   - Ground-level zoomed photos of elevated assets (Antennas, RRUs, BOA, Feeders, Jumpers, Mounting Hardware) are STRICTLY PROHIBITED. Technicians must climb the tower for close-range photos.
+   - Images must match designated report template slots (mislabeled or misplaced images must be flagged).
+   - Cabinets, ATS units, and power compartment doors must be fully opened and clearly photographed.
+2. CABLE DRESSING & CONTAINMENT INTEGRITY:
+   - Wiring inside outdoor cabinets, commercial power boxes, and ATS units must be neatly dressed, bundled, and routed without cross-overs.
+   - Cables must run inside designated trays (no cables outside). Metallic and PVC trunking covers must be aligned and secured.
+   - Feeder cables on towers must be neatly aligned, clamped at standard operational intervals, and properly dressed down through the entry bridge.
+   - Gas piping must be secured inside dedicated protective trays (never exposed or unsupported).
+3. SITE HOUSEKEEPING & FIRE SAFETY:
+   - Zero Vegetation Buffer: Clear dry grass, weeds, and combustible debris within 3m radius surrounding generator, fuel tank, cabinets, and fence line.
+   - Decommissioned/dead cables must be fully removed (cutting and abandoning cable segments on-site is strictly forbidden).
+   - All scrap, packaging, leftover installation materials, and replaced parts must be cleared.
+4. MANDATORY SITE EQUIPMENT & VERDICT:
+   - Verify presence and visual coverage of Diesel Generator (DG), Power Cabinet/Rectifiers, Battery Banks, Main Antenna/Tower, and Microwave.
+   - If key mandatory photos (e.g., DG, Rectifiers) are missing, blurry, or taken from a bad angle, flag them under missing/unclear photos and set Verdict to "PASS WITH CONCERNS" or "FAIL".
 
 MANDATORY OUTPUT FORMAT:
 ### 1. EQUIPMENT QUANTITY COUNT & AUDIT
@@ -436,8 +449,8 @@ MANDATORY OUTPUT FORMAT:
 | :--- | :--- | :--- | :--- |
 
 ### 2. MISSING OR UNCLEAR EQUIPMENT PHOTOS
-* **Unclear / Poor Quality Photos:** List any equipment photos that are blurry, taken from a bad angle, or dark.
-* **Missing Mandatory Photos:** Explicitly state if photos for Diesel Generator (DG), Rectifiers, Batteries, or Cables are missing.
+* **Unclear / Poor Quality Photos:** List any equipment photos that are blurry, taken from a bad angle/ground-level zoom, or dark.
+* **Missing Mandatory Photos:** Explicitly state if photos for Diesel Generator (DG), Rectifiers, Batteries, or Cables are missing or misplaced in wrong slots.
 
 ### 3. NTG ASSET TAGGING & BARCODE VERIFICATION
 * **Equipment Identifiers:** Describe NTG tags and asset labels visible in photos.
@@ -445,8 +458,8 @@ MANDATORY OUTPUT FORMAT:
 
 ### 4. FINAL VERDICT & DEFECTS
 * **Final Verdict:** [PASS / PASS WITH CONCERNS / FAIL]
-* **Identified Defects:** Note trash, loose cables, unanchored items, or missing clear photo proof.
-* **Corrective Actions:** Remediation steps (e.g., "Technician must re-upload a clear, full-view photo of the Diesel Generator (DG)").
+* **Identified Defects:** Detail all violations regarding vegetation, cable dressing/trays, tower photo distance, open doors, abandoned cables, or trash.
+* **Corrective Actions:** Specific remediation steps required from technician.
 """
 
                         report_text = generate_gemini_content_robust(
@@ -494,27 +507,25 @@ with tab_pm:
 You are a senior telecom audit supervisor analyzing PM checksheets and attached site photos. 
 Examine ALL provided text and image pages carefully to extract accurate technical audit details.
 
-STRICT FIELD INSPECTION & DEFECT DETECTION RULES:
-Whenever relevant issues are observed in the text or photo attachments, prioritize flagging these exact standard telecom defect statements in `critical_remarks` and `supervisor_focus_notes`:
+STRICT FIELD QUALITY & AUDIT COMPLIANCE DIRECTIVES:
+When inspecting the report and photos, evaluate and flag violations using these exact standard audit directives:
 
-1. SITE ENVIRONMENT & CLEANLINESS:
-   - "Dry grass near the generator." / "Dry grass near the generator & cabinet." / "Dry grass near the generator & fuel tank."
-   - "Don’t remove the extra materials." / Extra trash/debris on-site.
+1. TOWER ELEVATION & PHOTO COMPLIANCE:
+   - "The images of the items attached to the tower are unclear because the technician did not climb up to photograph them up close." (Ground-level zoomed photos are strictly prohibited).
+   - "The image does not represent what is required." / "The images are not in their correct positions." (Mislabeled or misplaced images in wrong template slots).
+   - "The cabin doors and the power compartment are not open." (Cabinets, ATS, and power compartments must be fully opened for inspection).
 
-2. CABLE ROUTING, TRAYS, AND CANOPIES:
-   - "Gas piping without cable trays"
+2. CABLE DRESSING & CONTAINMENT INTEGRITY:
    - "Disorganized cables in commercial power boxes and cabinets." / "Cables are disorganized in the commercial power box & the cabinet."
-   - "PVC tray inside the cabinet without a cover." / "The PVC tray inside the ATS has not been covered."
-   - "The tray cover is not closed properly."
+   - "Gas piping without cable trays" (Gas piping must be secured inside dedicated protective trays).
+   - "PVC tray inside the cabinet without a cover." / "The PVC tray inside the ATS has not been covered." / "The tray cover is not closed properly."
    - "Cables routed outside the tray." / "Cables are outside the tray."
-   - "Cutting abandoned cables at the site."
-   - "Disorganized Feeder cables on the tower."
+   - "Disorganized Feeder cables on the tower." (Feeder cables must be neatly aligned, clamped at standard operational intervals, and properly dressed).
 
-3. TOWER & PHOTO ELEVATION COMPLIANCE:
-   - "The images of the items attached to the tower are unclear because the technician did not climb up to photograph them up close."
-   - "The image does not represent what is required."
-   - "The images are not in their correct positions." / "The images are not in their correct places."
-   - "The cabin doors and the power compartment are not open."
+3. SITE HOUSEKEEPING & FIRE SAFETY:
+   - "Dry grass near the generator." / "Dry grass near the generator & cabinet." / "Dry grass near the generator & fuel tank." (Must maintain zero vegetation buffer within 3m radius).
+   - "Cutting abandoned cables at the site." / Leftover dead cables (Decommissioned cables must be completely removed, not cut and abandoned).
+   - "Don’t remove the extra materials." / Extra trash, scrap, or replaced parts left on site.
 
 4. DIESEL GENERATOR (DG) AUDIT RULES:
    - Mandatory DG photos: (a) Overall DG unit, (b) DG LED Display Screen showing running hours, (c) Numerical running hours recorded.
@@ -529,9 +540,9 @@ Return strictly concise, valid JSON matching this structure:
   "vendor_technician": "Technician Name",
   "pm_date": "YYYY-MM-DD",
   "verdict": "APPROVED" | "APPROVED WITH CONCERNS" | "REJECTED",
-  "missing_equipment_photos": ["List missing or unclear photos e.g. DG Unit, DG LED Screen, Tower Close-up"],
+  "missing_equipment_photos": ["List missing or unclear photos e.g. Tower Close-up, DG LED Screen, Open Cabinet Doors"],
   "critical_remarks": ["Detailed defect statements matching standard observation rules"],
-  "supervisor_focus_notes": ["Specific corrective actions required from technician"]
+  "supervisor_focus_notes": ["Specific corrective actions required from technician to meet mandatory directives"]
 }
 """
 
