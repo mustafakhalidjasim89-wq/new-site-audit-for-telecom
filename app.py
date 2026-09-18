@@ -175,7 +175,6 @@ def generate_gemini_content_robust(client, contents, config):
     if configured_model:
         candidate_models.append(configured_model)
     
-    # Priority active models based on the latest API specifications
     candidate_models.extend(["gemini-2.5-flash", "gemini-2.5-pro", "gemini-1.5-flash"])
     
     seen = set()
@@ -198,7 +197,6 @@ def generate_gemini_content_robust(client, contents, config):
             elif "429" in err_msg or "resource_exhausted" in err_msg:
                 time.sleep(3)
 
-    # Fallback: Dynamically query available models if explicit candidate list fails
     try:
         for m in client.models.list():
             if "generateContent" in getattr(m, "supported_generation_methods", []) or "flash" in m.name:
@@ -425,20 +423,25 @@ with tab_audit:
                         SYSTEM_PROMPT = """
 You are a telecom audit engineer inspecting physical equipment, mandatory site assets, photo quality, and NTG Asset Tagging.
 
+MANDATORY DIRECTIVE: Failure to adhere to these exact standards will result in immediate rejection of the site acceptance report and withholding of PM sign-off.
+
 FIELD QUALITY & AUDIT COMPLIANCE DIRECTIVES:
 1. TOWER ELEVATION & PHOTO COMPLIANCE:
-   - Ground-level zoomed photos of elevated assets (Antennas, RRUs, BOA, Feeders, Jumpers, Mounting Hardware) are STRICTLY PROHIBITED. Technicians must climb the tower for close-range photos.
-   - Images must match designated report template slots (mislabeled or misplaced images must be flagged).
-   - Cabinets, ATS units, and power compartment doors must be fully opened and clearly photographed.
+   - Mandatory Tower Climbing: Technicians MUST climb the tower to take close-range, high-resolution photos of all elevated assets (Antennas, RRUs, BOA, Feeders, Jumpers, Mounting Hardware). Ground-level zoomed photos are strictly prohibited.
+   - Exact Slot Allocation: Every image must be uploaded directly into its designated report template slot. Mislabeled or misplaced images will automatically trigger an audit rejection.
+   - Full Access Inspection: Cabinets, ATS units, and power compartment doors must be fully opened and clearly photographed during the audit process.
+
 2. CABLE DRESSING & CONTAINMENT INTEGRITY:
-   - Wiring inside outdoor cabinets, commercial power boxes, and ATS units must be neatly dressed, bundled, and routed without cross-overs.
-   - Cables must run inside designated trays (no cables outside). Metallic and PVC trunking covers must be aligned and secured.
-   - Feeder cables on towers must be neatly aligned, clamped at standard operational intervals, and properly dressed down through the entry bridge.
-   - Gas piping must be secured inside dedicated protective trays (never exposed or unsupported).
+   - Internal Cabinet Dressing: All wiring inside outdoor cabinets, commercial power boxes, and ATS units must be neatly dressed, bundled, and routed without cross-overs.
+   - Trays & Covers: Cables must run entirely inside designated cable trays (no cables routed outside). All metallic and PVC trunking covers must be correctly aligned and firmly secured.
+   - Feeder Clamping: Tower feeders must be neatly aligned, clamped at standard operational intervals, and properly dressed along the tower down through the entry bridge.
+   - Gas Piping Protection: Gas piping must never be left exposed or unsupported. Route and secure all gas piping inside dedicated protective trays.
+
 3. SITE HOUSEKEEPING & FIRE SAFETY:
-   - Zero Vegetation Buffer: Clear dry grass, weeds, and combustible debris within 3m radius surrounding generator, fuel tank, cabinets, and fence line.
-   - Decommissioned/dead cables must be fully removed (cutting and abandoning cable segments on-site is strictly forbidden).
-   - All scrap, packaging, leftover installation materials, and replaced parts must be cleared.
+   - Zero Vegetation Buffer: Clear all dry grass, weeds, and combustible debris within a 3-meter radius surrounding the generator, fuel tank, equipment cabinets, and fence line.
+   - Complete Cable Decommissioning: Decommissioned/dead cables must be fully traced, disconnected, and removed from the site. Cutting and abandoning cable segments on-site is strictly forbidden.
+   - Complete Scrap Clearance: Remove all packaging, leftover installation materials, replaced parts, and trash from the site compound prior to departure.
+
 4. MANDATORY SITE EQUIPMENT & VERDICT:
    - Verify presence and visual coverage of Diesel Generator (DG), Power Cabinet/Rectifiers, Battery Banks, Main Antenna/Tower, and Microwave.
    - If key mandatory photos (e.g., DG, Rectifiers) are missing, blurry, or taken from a bad angle, flag them under missing/unclear photos and set Verdict to "PASS WITH CONCERNS" or "FAIL".
@@ -504,35 +507,51 @@ with tab_pm:
                 all_site_data = []
 
                 BATCH_SYSTEM_PROMPT = """
-You are a senior telecom audit supervisor analyzing PM checksheets and attached site photos. 
-Examine ALL provided text and image pages carefully to extract accurate technical audit details.
+You are a senior telecom audit supervisor analyzing PM checksheets and attached site photos.
+Examine ALL provided text, checklist items, and image pages inside the PDF carefully to ensure full compliance with standard telecom directives and expert field observations.
 
-STRICT FIELD QUALITY & AUDIT COMPLIANCE DIRECTIVES:
-When inspecting the report and photos, evaluate and flag violations using these exact standard audit directives:
+Mandatory Directive: Failure to adhere to these exact standards will result in immediate rejection of the site acceptance report and withholding of PM sign-off.
 
-1. TOWER ELEVATION & PHOTO COMPLIANCE:
-   - "The images of the items attached to the tower are unclear because the technician did not climb up to photograph them up close." (Ground-level zoomed photos are strictly prohibited).
-   - "The image does not represent what is required." / "The images are not in their correct positions." (Mislabeled or misplaced images in wrong template slots).
-   - "The cabin doors and the power compartment are not open." (Cabinets, ATS, and power compartments must be fully opened for inspection).
+STANDARDIZED OPERATIONAL DIRECTIVES:
+1. Tower Elevation & Photo Compliance:
+   - Mandatory Tower Climbing: Technicians MUST climb the tower to take close-range, high-resolution photos of all elevated assets (Antennas, RRUs, BOA, Feeders, Jumpers, Mounting Hardware). Ground-level zoomed photos are strictly prohibited.
+   - Exact Slot Allocation: Every image must be uploaded directly into its designated report template slot. Mislabeled or misplaced images will automatically trigger an audit rejection.
+   - Full Access Inspection: Cabinets, ATS units, and power compartment doors must be fully opened and clearly photographed during the audit process.
 
-2. CABLE DRESSING & CONTAINMENT INTEGRITY:
-   - "Disorganized cables in commercial power boxes and cabinets." / "Cables are disorganized in the commercial power box & the cabinet."
-   - "Gas piping without cable trays" (Gas piping must be secured inside dedicated protective trays).
-   - "PVC tray inside the cabinet without a cover." / "The PVC tray inside the ATS has not been covered." / "The tray cover is not closed properly."
-   - "Cables routed outside the tray." / "Cables are outside the tray."
-   - "Disorganized Feeder cables on the tower." (Feeder cables must be neatly aligned, clamped at standard operational intervals, and properly dressed).
+2. Cable Dressing & Containment Integrity:
+   - Internal Cabinet Dressing: All wiring inside outdoor cabinets, commercial power boxes, and ATS units must be neatly dressed, bundled, and routed without cross-overs.
+   - Trays & Covers: Cables must run entirely inside designated cable trays (no cables routed outside). All metallic and PVC trunking covers must be correctly aligned and firmly secured.
+   - Feeder Clamping: Tower feeders must be neatly aligned, clamped at standard operational intervals, and properly dressed along the tower down through the entry bridge.
+   - Gas Piping Protection: Gas piping must never be left exposed or unsupported. Route and secure all gas piping inside dedicated protective trays.
 
-3. SITE HOUSEKEEPING & FIRE SAFETY:
-   - "Dry grass near the generator." / "Dry grass near the generator & cabinet." / "Dry grass near the generator & fuel tank." (Must maintain zero vegetation buffer within 3m radius).
-   - "Cutting abandoned cables at the site." / Leftover dead cables (Decommissioned cables must be completely removed, not cut and abandoned).
-   - "Don’t remove the extra materials." / Extra trash, scrap, or replaced parts left on site.
+3. Site Housekeeping & Fire Safety:
+   - Zero Vegetation Buffer: Clear all dry grass, weeds, and combustible debris within a 3-meter radius surrounding the generator, fuel tank, equipment cabinets, and fence line.
+   - Complete Cable Decommissioning: Decommissioned/dead cables must be fully traced, disconnected, and removed from the site. Cutting and abandoning cable segments on-site is strictly forbidden.
+   - Complete Scrap Clearance: Remove all packaging, leftover installation materials, replaced parts, and trash from the site compound prior to departure.
 
 4. DIESEL GENERATOR (DG) AUDIT RULES:
    - Mandatory DG photos: (a) Overall DG unit, (b) DG LED Display Screen showing running hours, (c) Numerical running hours recorded.
    - If missing: Flag "Site without DG / DG evidence missing - Mandatory DG photo, LED screen image, and running hours required".
 
-5. NO DEFECTS FOUND:
-   - If all check items, photo positions, and parameters are fully compliant, explicitly state "No issue".
+EXPERT FIELD OBSERVATION RULES (Match detected non-conformities against these exact observation notes when applicable):
+- "Dry grass near the generator."
+- "Gas piping without cable trays"
+- "Cutting abandoned cables at the site"
+- "Disorganized cables in commercial power boxes and cabinets."
+- "PVC tray inside the cabinet without a cover."
+- "Dry grass near the generator." / "Disorganized cables in commercial power boxes"
+- "No issue"
+- "The tray cover is not closed properly." / "Cables are disorganized in the commercial power box & the cabinet." / "Gas piping without cable trays" / "The PVC tray inside the ATS has not been covered." / "The images of the items attached to the tower are unclear because the technician did not climb up to photograph them at close range."
+- "Dry grass near the generator & cabinet." / "Disorganized cables in the commercial power box & cabinet" / "Cables routed outside the tray." / "The images of the items attached to the tower are unclear because the technician did not climb up to photograph them at close range."
+- "The tray cover is not closed properly." / "The images of the items attached to the tower are unclear because the technician did not climb up to photograph them at close range." / "Disorganized cables in the cabinet."
+- "The image does not represent what is required." / "The images of the items attached to the tower are unclear because the technician did not climb up to photograph them at close range." / "The tray cover is not closed properly." / "Cables are disorganized in the commercial power box & the cabinet."
+- "Don’t remove the extra materials." / "Cables are disorganized in the cabinet."
+- "The tray cover is not closed properly." / "The images of the items attached to the tower are unclear because the technician did not climb up to photograph them at close range."
+- "The tray cover is not closed properly." / "Disorganized Feeder cables on the tower." / "Cables are disorganized in the commercial power boxes and cabinets." / "The images of the items attached to the tower are unclear because the technician did not climb up to photograph them up close."
+- "The images of the items attached to the tower are unclear because the technician did not climb up to photograph them up close." / "Cables are disorganized in the commercial power boxes and cabinets." / "The cabin doors and the power compartment are not open."
+- "The tray cover is not closed properly." / "Cables are disorganized in the commercial power box"
+- "The tray cover is not closed properly." / "The images are not in their correct positions." / "Cables are outside the tray." / "Cutting abandoned cables at the site." / "Cables are disorganized in the commercial power boxes and cabinets." / "The images of the items attached to the tower are unclear because the technician did not climb up to photograph them up close."
+- "The tray cover is not closed properly." / "The images are not in their correct places." / "Dry grass near the generator & full tank." / "The cables inside the cabinet are unorganized." / "The images of the items attached to the tower are unclear because the technician did not climb up to photograph them up close."
 
 Return strictly concise, valid JSON matching this structure:
 {
