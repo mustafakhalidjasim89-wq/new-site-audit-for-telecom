@@ -4,6 +4,7 @@ import io
 import time
 import re
 import json
+import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
@@ -66,12 +67,12 @@ def optimize_image(uploaded_file, max_size=(800, 800), quality=75):
     return Image.open(buffer)
 
 # ---------------------------------------------------------
-# Helper: PDF Text & Resized Image Extractor
+# Helper: PDF Text & Resized Image Extractor (Enhanced)
 # ---------------------------------------------------------
-def process_and_resize_pdf(pdf_file, max_chars=6000, target_dpi=100, max_size=(800, 800)):
+def process_and_resize_pdf(pdf_file, max_chars=20000, target_dpi=100, max_size=(800, 800), max_pages=15):
     """
     Extracts text and converts scanned PDF pages into downscaled JPEG images.
-    Drastically decreases payload size and execution latency.
+    Supports multi-page PM checksheets up to `max_pages`.
     """
     text_content = ""
     resized_images = []
@@ -83,19 +84,21 @@ def process_and_resize_pdf(pdf_file, max_chars=6000, target_dpi=100, max_size=(8
         # 1. Extract and clean text using PyPDF
         reader = PdfReader(io.BytesIO(pdf_bytes))
         raw_text = ""
-        for page in reader.pages:
+        for page_num, page in enumerate(reader.pages):
             t = page.extract_text()
             if t:
-                raw_text += t + "\n"
+                raw_text += f"\n--- Page {page_num + 1} ---\n" + t
 
-        text_content = re.sub(r'\s+', ' ', raw_text).strip()
+        text_content = re.sub(r'[ \t]+', ' ', raw_text).strip()
         if len(text_content) > max_chars:
-            text_content = text_content[:max_chars] + "... [TRUNCATED FOR SPEED]"
+            text_content = text_content[:max_chars] + "\n... [TRUNCATED FOR SPEED]"
 
         # 2. Render and resize PDF pages as images if PyMuPDF is available
         if FITZ_AVAILABLE:
             doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-            for page in doc:
+            for page_idx, page in enumerate(doc):
+                if page_idx >= max_pages:
+                    break
                 pix = page.get_pixmap(dpi=target_dpi)
                 img = Image.open(io.BytesIO(pix.tobytes("jpeg")))
                 img.thumbnail(max_size, Image.Resampling.LANCZOS)
@@ -104,6 +107,8 @@ def process_and_resize_pdf(pdf_file, max_chars=6000, target_dpi=100, max_size=(8
                 img.save(buf, format="JPEG", quality=70, optimize=True)
                 buf.seek(0)
                 resized_images.append(Image.open(buf))
+        else:
+            st.warning("⚠️ PyMuPDF (fitz) is not installed. Scanned PDF pages cannot be processed visually.")
 
     except Exception as e:
         st.error(f"Error processing PDF '{pdf_file.name}': {str(e)}")
@@ -116,7 +121,6 @@ def process_and_resize_pdf(pdf_file, max_chars=6000, target_dpi=100, max_size=(8
 def parse_gemini_json(raw_text):
     """
     Cleans markdown formatting and repairs common JSON truncation or escaping errors.
-    Prevents 'Unterminated string' crashes when Gemini outputs dense logs.
     """
     if not raw_text:
         raise ValueError("Empty response received from Gemini.")
@@ -355,37 +359,4 @@ with tab_audit:
 
     is_location_valid = False
     if manual_site_input == "BAG0000":
-        is_location_valid = True
-        st.success("🃏 Joker Test Site Active (BAG0000). GPS validation bypassed.")
-    elif manual_site_input and not df_sites.empty:
-        target_col = next((c for c in ['site_code', 'site_id', 'name'] if c in df_sites.columns), None)
-        if target_col:
-            matched = df_sites[df_sites[target_col].astype(str).str.strip().str.upper() == manual_site_input]
-            if not matched.empty:
-                site_lat, site_lon = matched.iloc[0].get('latitude'), matched.iloc[0].get('longitude')
-                if site_lat and site_lon and user_lat and user_lon:
-                    dist_m = int(calculate_distance_km(user_lat, user_lon, site_lat, site_lon) * 1000)
-                    if dist_m <= 200:
-                        is_location_valid = True
-                        st.success(f"✅ GPS Validated ({dist_m}m away).")
-                    else:
-                        st.error(f"❌ GPS Mismatch: {dist_m}m away. Must be < 200m.")
-                else:
-                    st.warning("⚠️ GPS signal needed for validation.")
-            else:
-                is_location_valid = True
-        else:
-            is_location_valid = True
-    elif manual_site_input:
-        is_location_valid = True
-
-    if "captured_photos" not in st.session_state:
-        st.session_state["captured_photos"] = []
-
-    uploaded_files = []
-    if manual_site_input and is_location_valid:
-        input_mode = st.radio("Input Source:", ["Camera", "Gallery"], horizontal=True)
-        if input_mode == "Camera":
-            img_file = st.camera_input("Take Picture")
-            if img_file and not any(p.getvalue() == img_file.getvalue() for p in st.session_state["captured_photos"]):
-                st.session_state["captured_photos"].append(img_file)
+        is_location_
