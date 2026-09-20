@@ -67,7 +67,7 @@ def optimize_image(uploaded_file, max_size=(800, 800), quality=75):
     return Image.open(buffer)
 
 # ---------------------------------------------------------
-# Helper: PDF Text & Resized Image Extractor (Enhanced)
+# Helper: PDF Text & Resized Image Extractor
 # ---------------------------------------------------------
 def process_and_resize_pdf(pdf_file, max_chars=20000, target_dpi=100, max_size=(800, 800), max_pages=15):
     """
@@ -359,4 +359,316 @@ with tab_audit:
 
     is_location_valid = False
     if manual_site_input == "BAG0000":
-        is_location_
+        is_location_valid = True
+        st.success("🃏 Joker Test Site Active (BAG0000). GPS validation bypassed.")
+    elif manual_site_input and not df_sites.empty:
+        target_col = next((c for c in ['site_code', 'site_id', 'name'] if c in df_sites.columns), None)
+        if target_col:
+            matched = df_sites[df_sites[target_col].astype(str).str.strip().str.upper() == manual_site_input]
+            if not matched.empty:
+                site_lat, site_lon = matched.iloc[0].get('latitude'), matched.iloc[0].get('longitude')
+                if site_lat and site_lon and user_lat and user_lon:
+                    dist_m = int(calculate_distance_km(user_lat, user_lon, site_lat, site_lon) * 1000)
+                    if dist_m <= 200:
+                        is_location_valid = True
+                        st.success(f"✅ GPS Validated ({dist_m}m away).")
+                    else:
+                        st.error(f"❌ GPS Mismatch: {dist_m}m away. Must be < 200m.")
+                else:
+                    st.warning("⚠️ GPS signal needed for validation.")
+            else:
+                is_location_valid = True
+        else:
+            is_location_valid = True
+    elif manual_site_input:
+        is_location_valid = True
+
+    if "captured_photos" not in st.session_state:
+        st.session_state["captured_photos"] = []
+
+    uploaded_files = []
+    if manual_site_input and is_location_valid:
+        input_mode = st.radio("Input Source:", ["Camera", "Gallery"], horizontal=True)
+        if input_mode == "Camera":
+            img_file = st.camera_input("Take Picture")
+            if img_file and not any(p.getvalue() == img_file.getvalue() for p in st.session_state["captured_photos"]):
+                st.session_state["captured_photos"].append(img_file)
+
+            if st.button("🗑️ Clear All"):
+                st.session_state["captured_photos"] = []
+                st.rerun()
+
+            uploaded_files = st.session_state["captured_photos"]
+        else:
+            img_files = st.file_uploader("Upload photos", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
+            if img_files:
+                uploaded_files.extend(img_files)
+
+        if uploaded_files:
+            cols = st.columns(6)
+            for idx, file in enumerate(uploaded_files):
+                with cols[idx % 6]:
+                    st.image(file, width=80)
+
+    if st.button("📤 Run Audit & Submit", use_container_width=True, disabled=(not manual_site_input or not is_location_valid)):
+        if not uploaded_files:
+            st.warning("Please attach at least one photo.")
+        else:
+            gemini_key = st.secrets.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
+            if not gemini_key:
+                st.error("Missing GEMINI_API_KEY!")
+            else:
+                with st.spinner("⚡ Processing Audit..."):
+                    try:
+                        client = genai.Client(api_key=gemini_key)
+                        pil_images = [optimize_image(f) for f in uploaded_files]
+
+                        SYSTEM_PROMPT = """
+You are a telecom audit engineer inspecting physical equipment, mandatory site assets, photo quality, and NTG Asset Tagging.
+
+MANDATORY DIRECTIVE: Failure to adhere to these exact standards will result in immediate rejection of the site acceptance report and withholding of PM sign-off.
+
+FIELD QUALITY & AUDIT COMPLIANCE DIRECTIVES:
+1. TOWER ELEVATION & PHOTO COMPLIANCE:
+   - Mandatory Tower Climbing: Technicians MUST climb the tower to take close-range, high-resolution photos of all elevated assets (Antennas, RRUs, BOA, Feeders, Jumpers, Mounting Hardware). Ground-level zoomed photos are strictly prohibited.
+   - Exact Slot Allocation: Every image must be uploaded directly into its designated report template slot. Mislabeled or misplaced images will automatically trigger an audit rejection.
+   - Full Access Inspection: Cabinets, ATS units, and power compartment doors must be fully opened and clearly photographed during the audit process.
+
+2. CABLE DRESSING & CONTAINMENT INTEGRITY:
+   - Internal Cabinet Dressing: All wiring inside outdoor cabinets, commercial power boxes, and ATS units must be neatly dressed, bundled, and routed without cross-overs.
+   - Trays & Covers: Cables must run entirely inside designated cable trays (no cables routed outside). All metallic and PVC trunking covers must be correctly aligned and firmly secured.
+   - Feeder Clamping: Tower feeders must be neatly aligned, clamped at standard operational intervals, and properly dressed along the tower down through the entry bridge.
+   - Gas Piping Protection: Gas piping must never be left exposed or unsupported. Route and secure all gas piping inside dedicated protective trays.
+
+3. SITE HOUSEKEEPING & FIRE SAFETY:
+   - Zero Vegetation Buffer: Clear all dry grass, weeds, and combustible debris within a 3-meter radius surrounding the generator, fuel tank, equipment cabinets, and fence line.
+   - Complete Cable Decommissioning: Decommissioned/dead cables must be fully traced, disconnected, and removed from the site. Cutting and abandoning cable segments on-site is strictly forbidden.
+   - Complete Scrap Clearance: Remove all packaging, leftover installation materials, replaced parts, and trash from the site compound prior to departure.
+
+4. MANDATORY SITE EQUIPMENT & VERDICT:
+   - Verify presence and visual coverage of Diesel Generator (DG), Power Cabinet/Rectifiers, Battery Banks, Main Antenna/Tower, and Microwave.
+   - If key mandatory photos (e.g., DG, Rectifiers) are missing, blurry, or taken from a bad angle, flag them under missing/unclear photos and set Verdict to "PASS WITH CONCERNS" or "FAIL".
+
+MANDATORY OUTPUT FORMAT:
+### 1. EQUIPMENT QUANTITY COUNT & AUDIT
+| Equipment / Asset Description | Identified Model / Brand | Quantities Detected | Photo Status (Clear / Blurry / Missing) |
+| :--- | :--- | :--- | :--- |
+
+### 2. MISSING OR UNCLEAR EQUIPMENT PHOTOS
+* **Unclear / Poor Quality Photos:** List any equipment photos that are blurry, taken from a bad angle/ground-level zoom, or dark.
+* **Missing Mandatory Photos:** Explicitly state if photos for Diesel Generator (DG), Rectifiers, Batteries, or Cables are missing or misplaced in wrong slots.
+
+### 3. NTG ASSET TAGGING & BARCODE VERIFICATION
+* **Equipment Identifiers:** Describe NTG tags and asset labels visible in photos.
+* **Cable & Port Labels:** Describe port labels/tags.
+
+### 4. FINAL VERDICT & DEFECTS
+* **Final Verdict:** [PASS / PASS WITH CONCERNS / FAIL]
+* **Identified Defects:** Detail all violations regarding vegetation, cable dressing/trays, tower photo distance, open doors, abandoned cables, or trash.
+* **Corrective Actions:** Specific remediation steps required from technician.
+"""
+
+                        report_text = generate_gemini_content_robust(
+                            client=client,
+                            contents=[f"Site ID: {manual_site_input}\nTechnician: {tech_name_input or 'Unassigned'}", *pil_images],
+                            config=types.GenerateContentConfig(system_instruction=SYSTEM_PROMPT, temperature=0.0)
+                        )
+
+                        if report_text:
+                            st.subheader("📋 Audit Report")
+                            st.markdown(report_text)
+                            
+                            status_verdict = "FAIL" if "FAIL" in report_text.upper() else ("PASS WITH CONCERNS" if "CONCERNS" in report_text.upper() else "PASS")
+                            if save_report_to_supabase(manual_site_input, tech_name_input or 'Unassigned', status_verdict, report_text, user_lat, user_lon):
+                                st.success("✅ Audit logged successfully!")
+                                st.session_state["captured_photos"] = []
+                    except Exception as e:
+                        st.error(f"Audit processing failed: {str(e)}")
+
+# ---------------------------------------------------------
+# TAB 2: Multi-PM Analyzer (Enhanced Multi-PDF Analyzer)
+# ---------------------------------------------------------
+with tab_pm:
+    st.subheader("📄 Multi-PM Checksheet Analyzer")
+    
+    uploaded_pdfs = st.file_uploader(
+        "Upload Multiple PM PDF Files",
+        type=["pdf"],
+        accept_multiple_files=True,
+        help="Upload one or multiple PM checksheets simultaneously."
+    )
+
+    if uploaded_pdfs:
+        st.info(f"📂 **{len(uploaded_pdfs)}** PDF file(s) loaded.")
+
+        if st.button("🚀 Process All PM PDFs", use_container_width=True):
+            gemini_key = st.secrets.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
+            if not gemini_key:
+                st.error("Missing GEMINI_API_KEY!")
+            else:
+                client = genai.Client(api_key=gemini_key)
+                all_site_data = []
+
+                ENHANCED_PM_SYSTEM_PROMPT = """
+You are an expert telecom audit supervisor performing rigorous PM checksheet analysis.
+Thoroughly inspect the provided text AND rendered page images of the PM PDF.
+Your objective is to identify all physical defects, missing/unclear photos, and operational non-conformities.
+
+OPERATIONAL AND DEFECT IDENTIFICATION DIRECTIVES:
+1. TOWER ASSETS & PHOTO COMPLIANCE:
+   - Check if elevated assets (Antennas, RRUs, BOA, Feeders, Jumpers) have clear, close-range photos.
+   - If images are clearly taken from the ground using zoom instead of climbing, record: "The images of the items attached to the tower are unclear because the technician did not climb up to photograph them at close range."
+   - Check if equipment cabinet doors, power compartments, and ATS doors are fully open in photos. If closed, record: "The cabin doors and the power compartment are not open."
+
+2. CABLE DRESSING & CONTAINMENT:
+   - Check internal dressing. If cables are unbundled or crossing over, record: "Disorganized cables in commercial power boxes and cabinets." or "Cables are disorganized in the commercial power box & the cabinet."
+   - Check cable trunking and trays. If covers are missing or misaligned, record: "PVC tray inside the cabinet without a cover." or "The tray cover is not closed properly." or "The PVC tray inside the ATS has not been covered."
+   - Check if cables run outside designated containment, record: "Cables routed outside the tray."
+   - Check tower feeders. If unbundled or sagging, record: "Disorganized Feeder cables on the tower."
+   - Check gas piping protection. If exposed without tray support, record: "Gas piping without cable trays."
+
+3. FIRE SAFETY & HOUSEKEEPING:
+   - Check for vegetation around equipment, fuel tanks, and generators. Record matching remarks: "Dry grass near the generator.", "Dry grass near the generator & cabinet.", or "Dry grass near the generator & fuel tank."
+   - Check for leftover installation scrap or abandoned cables. Record: "Cutting abandoned cables at the site" or "Don’t remove the extra materials."
+
+4. DIESEL GENERATOR (DG) INSPECTION:
+   - Verify presence of: (a) Overall DG Photo, (b) DG Controller/LED Display Photo, (c) Running Hours value.
+   - If DG evidence or display screen photo is missing: Record under missing_equipment_photos and set critical_remarks to: "Site without DG / DG evidence missing - Mandatory DG photo, LED screen image, and running hours required".
+
+5. GENERAL PHOTO VALIDATION:
+   - If an attached photo does not match the checklist label/slot requirement, record: "The image does not represent what is required."
+
+JSON OUTPUT REQUIREMENTS:
+Return ONLY valid, structured JSON following this structure:
+{
+  "site_id": "Extracted Site ID (e.g. BAG3872)",
+  "vendor_technician": "Technician or Subcontractor Name",
+  "pm_date": "YYYY-MM-DD",
+  "verdict": "APPROVED" | "APPROVED WITH CONCERNS" | "REJECTED",
+  "missing_equipment_photos": [
+    "List specific missing or misallocated photos (e.g. Tower Close-ups, DG LED Screen, Open Cabinet Doors)"
+  ],
+  "critical_remarks": [
+    "List all detected physical defects matching exact operational notes listed above"
+  ],
+  "supervisor_focus_notes": [
+    "Actionable supervisor directives specifying required rework for the technician"
+  ]
+}
+"""
+
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+
+                for idx, pdf_file in enumerate(uploaded_pdfs):
+                    status_text.text(f"⚙️ Analyzing PDF ({idx+1}/{len(uploaded_pdfs)}): {pdf_file.name}")
+                    
+                    text_content, resized_page_images = process_and_resize_pdf(pdf_file, max_chars=20000, max_pages=15)
+                    
+                    payload = [f"FILENAME: {pdf_file.name}\nEXTRACTED CHECKLIST TEXT:\n{text_content}"]
+                    if resized_page_images:
+                        payload.extend(resized_page_images)
+
+                    gen_config = types.GenerateContentConfig(
+                        system_instruction=ENHANCED_PM_SYSTEM_PROMPT,
+                        temperature=0.0,
+                        max_output_tokens=4096,
+                        response_mime_type="application/json"
+                    )
+
+                    try:
+                        raw_response = generate_gemini_content_robust(
+                            client=client,
+                            contents=payload,
+                            config=gen_config
+                        )
+                        
+                        parsed = parse_gemini_json(raw_response)
+                        parsed["filename"] = pdf_file.name
+                        all_site_data.append(parsed)
+                        
+                    except Exception as e:
+                        all_site_data.append({
+                            "filename": pdf_file.name,
+                            "site_id": "ERROR",
+                            "vendor_technician": "N/A",
+                            "pm_date": "N/A",
+                            "verdict": "REJECTED",
+                            "missing_equipment_photos": ["Failed to extract PDF data"],
+                            "critical_remarks": [f"Parsing error: {str(e)}"],
+                            "supervisor_focus_notes": ["Re-upload PDF or check if PDF is password protected"]
+                        })
+
+                    progress_bar.progress((idx + 1) / len(uploaded_pdfs))
+
+                status_text.success("✅ All PM files analyzed successfully!")
+                st.session_state["pm_analysis_results"] = all_site_data
+
+    # Display Summary & Findings View
+    if "pm_analysis_results" in st.session_state and st.session_state["pm_analysis_results"]:
+        results = st.session_state["pm_analysis_results"]
+        st.markdown("### 📋 Multi-PM Audit & Findings Summary")
+        
+        # 1. Concise Overview Table
+        summary_rows = []
+        for r in results:
+            missing_photos = r.get("missing_equipment_photos", [])
+            remarks = r.get("critical_remarks", [])
+            focus_notes = r.get("supervisor_focus_notes", [])
+
+            summary_rows.append({
+                "Site ID": r.get("site_id", "N/A"),
+                "Technician": r.get("vendor_technician", "N/A"),
+                "Date": r.get("pm_date", "N/A"),
+                "Verdict": r.get("verdict", "N/A"),
+                "Missing / Unclear Photos": " | ".join(missing_photos) if isinstance(missing_photos, list) else str(missing_photos),
+                "Critical Remarks": " | ".join(remarks) if isinstance(remarks, list) else str(remarks),
+                "Supervisor Focus Notes": " | ".join(focus_notes) if isinstance(focus_notes, list) else str(focus_notes),
+                "Filename": r.get("filename", "")
+            })
+        
+        df_summary = pd.DataFrame(summary_rows)
+        st.dataframe(df_summary, use_container_width=True)
+
+        st.download_button(
+            label="📥 Download Detailed Findings Summary (.xlsx)",
+            data=convert_df_to_excel(df_summary, sheet_name='PM_Findings'),
+            file_name="PM_Audit_Findings_Summary.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+        # 2. Structured Expandable Defect Cards per Site
+        st.markdown("---")
+        st.markdown("### 🔍 Site-by-Site Supervisor Defect Breakdown")
+        for r in results:
+            site_label = f"{r.get('site_id', 'UNKNOWN')} — {r.get('verdict', 'N/A')} ({r.get('filename', '')})"
+            with st.expander(site_label, expanded=False):
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    st.write(f"**Technician:** {r.get('vendor_technician', 'N/A')}")
+                with col_b:
+                    st.write(f"**PM Date:** {r.get('pm_date', 'N/A')}")
+
+                st.markdown("#### 📷 Missing / Unclear Equipment Photos")
+                m_photos = r.get("missing_equipment_photos", [])
+                if isinstance(m_photos, list) and m_photos:
+                    for item in m_photos:
+                        st.markdown(f"- ⚠️ {item}")
+                else:
+                    st.write("None flagged.")
+
+                st.markdown("#### 🛠️ Critical Remarks & Observations")
+                rems = r.get("critical_remarks", [])
+                if isinstance(rems, list) and rems:
+                    for item in rems:
+                        st.markdown(f"- ❌ {item}")
+                else:
+                    st.write("No major defects detected.")
+
+                st.markdown("#### 🎯 Supervisor Action Notes")
+                f_notes = r.get("supervisor_focus_notes", [])
+                if isinstance(f_notes, list) and f_notes:
+                    for item in f_notes:
+                        st.markdown(f"- 📌 {item}")
+                else:
+                    st.write("No immediate rework requested.")
