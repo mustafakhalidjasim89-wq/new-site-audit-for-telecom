@@ -9,3 +9,15 @@ google-genai
 streamlit-js-eval
 supabase
 openpyxl
+streamlit
+pandas
+numpy
+opencv-python-headless
+Pillow
+google-genai
+streamlit-js-eval
+supabase
+pypdf
+PyMuPDF
+pyzbar
+openpyxl
