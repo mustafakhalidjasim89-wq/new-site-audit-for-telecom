@@ -52,7 +52,7 @@ def optimize_image(uploaded_file, max_size=(2048, 2048), quality=95):
     return Image.open(buf)
 
 # ---------------------------------------------------------
-# PDF Processing Engine (220 DPI & 2048x2048 Resolution)
+# PDF Processing Engine
 # ---------------------------------------------------------
 def process_and_resize_pdf(pdf_file, max_chars=25000, target_dpi=220, max_size=(2048, 2048), max_pages=15):
     text_content = ""
@@ -127,7 +127,7 @@ def parse_gemini_json(raw_text: str) -> Dict[str, Any]:
         raise ValueError(f"Failed to parse model output: {raw_text[:150]}...")
 
 # ---------------------------------------------------------
-# Resilient Model Caller with Retries (503 / 500 / 429)
+# Resilient Dynamic Model Caller with Exponential Backoff
 # ---------------------------------------------------------
 def generate_gemini_content_robust(client, contents, config, max_retries=3):
     configured_model = st.secrets.get("GEMINI_MODEL") or os.environ.get("GEMINI_MODEL")
@@ -154,13 +154,11 @@ def generate_gemini_content_robust(client, contents, config, max_retries=3):
                 last_error = err
                 err_msg = str(err).lower()
 
-                # Handle 404 immediately by switching model
                 if "404" in err_msg or "not_found" in err_msg:
-                    break  # Try next model
+                    break
 
-                # Retry on transient server, rate-limit, or overload errors
                 if any(code in err_msg for code in ["503", "unavailable", "500", "internal", "429", "resource_exhausted"]):
-                    sleep_time = (attempt + 1) * 3  # Exponential delay: 3s, 6s, 9s
+                    sleep_time = (attempt + 1) * 3
                     time.sleep(sleep_time)
                     continue
                 else:
@@ -172,11 +170,9 @@ def generate_gemini_content_robust(client, contents, config, max_retries=3):
 # FUZZY DEDUPLICATION ENGINE
 # ---------------------------------------------------------
 def is_similar_text(text1: str, text2: str, threshold: float = 0.85) -> bool:
-    """Calculates string similarity ratio using difflib SequenceMatcher."""
     return difflib.SequenceMatcher(None, text1.lower().strip(), text2.lower().strip()).ratio() >= threshold
 
 def deduplicate_findings(findings: List[Dict[str, Any]], similarity_threshold: float = 0.85) -> List[Dict[str, Any]]:
-    """Deduplicates findings based on asset match + fuzzy observation similarity."""
     unique_findings = []
 
     for f in findings:
@@ -199,10 +195,10 @@ def deduplicate_findings(findings: List[Dict[str, Any]], similarity_threshold: f
     return unique_findings
 
 # ---------------------------------------------------------
-# MULTI-AGENT TELECOM AUDIT PIPELINE ENGINE
+# HIGH-PRECISION PIPELINE ENGINE (96%+ ACCURACY TARGET)
 # ---------------------------------------------------------
 
-# Stage 1: Photo Completeness Agent
+# Stage 1: Photo Set Completeness Agent
 def validate_photo_set(client, images: List[Image.Image]) -> Dict[str, bool]:
     validation_prompt = """
 You are a Lead Telecom PM Auditor.
@@ -251,25 +247,24 @@ Check whether the submitted photos contain:
             "dg_display": False
         }
 
-# Stage 2: Defect Detection Agent (Single High-Precision Pass)
+# Stage 2: Precision Defect Detection Agent
 def detect_defects(client, image: Image.Image, photo_id: int) -> List[Dict[str, Any]]:
     prompt = f"""You are a Senior Telecom Quality Assurance Inspector auditing photo #{photo_id}.
 
-IMPORTANT RULES:
-1. Report ONLY visible, observable physical facts.
-2. Never guess or infer unshown items.
-3. Ignore anything not clearly visible in this specific photo.
-4. Confidence Scoring Rules:
-   - 100 = Clearly visible, undeniable physical issue.
-   - 90 = Visible but partially obscured or shadowed.
-   - 80 = Uncertain or borderline visible.
-   - Any finding below 80 MUST NOT BE REPORTED.
+IMPORTANT RULES FOR HIGH ACCURACY:
+1. Report ONLY visible, undeniable physical facts.
+2. Do NOT guess or infer unshown components.
+3. Strict Confidence Rules:
+   - 100 = Clearly visible physical defect.
+   - 90 = Visible but partially shadowed or distant.
+   - 80 = Borderline or uncertain observation.
+   - Below 80 = DO NOT REPORT.
 
-5. Severity Guidelines:
-   - Critical: Direct safety hazard, exposed live electrical wire, water ingress risk, active equipment malfunction.
-   - Major: Missing protective cover (ATS/Trunking), unbundled/sagging cables, missing grounding lugs.
-   - Minor: Missing asset barcode label, minor paint scratch, slight cable alignment issue.
-   - Observation: Housekeeping item, minor dust/debris inside compound.
+4. Severity Guidelines:
+   - Critical: Exposed live wires, water ingress risk, active hardware hazard.
+   - Major: Missing protective cover (ATS/Trunking), unbundled feeder cables, missing ground lug.
+   - Minor: Missing barcode label, slight paint scratch, minor cable alignment.
+   - Observation: Compound housekeeping, minor dust inside cabinet.
 """
 
     schema = {
@@ -318,7 +313,7 @@ IMPORTANT RULES:
     except Exception:
         return []
 
-# Stage 3: Defect Verification Agent (Strict Prefix Checking)
+# Stage 3: Targeted Verification Agent
 def verify_defect(client, image: Image.Image, finding: Dict[str, Any]) -> bool:
     prompt = f"""
 Verify the following telecom finding against the attached photo.
@@ -342,14 +337,13 @@ NOT VERIFIED
             )
         )
         answer = response.text.strip().upper()
-        
         if answer.startswith("VERIFIED") and not answer.startswith("NOT VERIFIED"):
             return True
         return False
     except Exception:
         return False
 
-# Stage 4: Global QA Supervisor Review Agent (Asset Inventory + Context Harmonization)
+# Stage 4: Supervisor Pass (Asset Inventory & Harmonization)
 def supervisor_review(client, findings: List[Dict[str, Any]], photo_status: Dict[str, bool]) -> Dict[str, Any]:
     prompt = f"""You are a Lead Telecom QA Supervisor performing a final review of audit findings across all site photos.
 
@@ -358,10 +352,10 @@ Your Objectives:
 2. Clean up and harmonize findings: remove duplicate findings, merge equivalent observations across photos, and keep valid findings concise and clear.
 3. Return the consolidated list of approved findings along with the complete asset inventory.
 
-RAW FINDINGS SUBMITTED FOR REVIEW:
+RAW FINDINGS:
 {json.dumps(findings, indent=2)}
 
-PHOTO COMPLETENESS SUMMARY:
+PHOTO COMPLETENESS:
 {json.dumps(photo_status, indent=2)}
 """
 
@@ -408,19 +402,16 @@ PHOTO COMPLETENESS SUMMARY:
         )
         return parse_gemini_json(response.text)
     except Exception:
-        # Fallback to unreviewed findings if supervisor call fails
         return {
-            "detected_assets": ["Telecom Site Infrastructure"],
+            "detected_assets": ["Telecom Infrastructure"],
             "approved_findings": findings
         }
 
-# Stage 5: Pipeline Orchestrator with Smart Confidence Gating
+# Orchestrator
 def run_telecom_audit_pipeline(client, images: List[Image.Image]) -> Dict[str, Any]:
-    # 1. Check photo set completeness
     photo_status = validate_photo_set(client, images)
     raw_candidates = []
 
-    # 2. Process each image with smart Python confidence rules
     for idx, img in enumerate(images):
         photo_id = idx + 1
         detected = detect_defects(client, img, photo_id)
@@ -428,19 +419,13 @@ def run_telecom_audit_pipeline(client, images: List[Image.Image]) -> Dict[str, A
         for finding in detected:
             confidence = finding.get("confidence", 0)
 
-            # Rule 1: Auto-accept high-confidence detections (bypasses 2nd Gemini call)
             if confidence >= 90:
                 raw_candidates.append(finding)
-            # Rule 2: Verify borderline detections (80 <= confidence < 90)
             elif confidence >= 80:
                 if verify_defect(client, img, finding):
                     raw_candidates.append(finding)
-            # Rule 3: Reject < 80 automatically
 
-    # 3. Apply Python fuzzy deduplication (0.85 threshold)
     deduplicated = deduplicate_findings(raw_candidates, similarity_threshold=0.85)
-
-    # 4. Final Global Supervisor Review Pass (Asset Inventory + Consolidation)
     supervisor_result = supervisor_review(client, deduplicated, photo_status)
 
     return {
@@ -449,15 +434,12 @@ def run_telecom_audit_pipeline(client, images: List[Image.Image]) -> Dict[str, A
         "findings": supervisor_result.get("approved_findings", [])
     }
 
-# Stage 6: Rule-Based Industry Verdict Calculation (Mandatory Photo Logic)
+# Rule-Based Verdict Engine
 def calculate_verdict(findings: List[Dict[str, Any]], photos: Dict[str, bool]) -> Dict[str, Any]:
-    # Define strictly mandatory photos required for site acceptance
     mandatory_photos = {
         "tower_closeup": "Tower Closeup",
         "cabinet_open": "Cabinet Interior"
     }
-    
-    # Optional / Secondary photos
     optional_photos = {
         "antenna_view": "Antenna View",
         "ats_open": "ATS Interior",
@@ -490,16 +472,12 @@ def calculate_verdict(findings: List[Dict[str, Any]], photos: Dict[str, bool]) -
         "missing_optional": missing_optional
     }
 
-# ---------------------------------------------------------
-# EXCEL GENERATOR HELPER
-# ---------------------------------------------------------
+# Excel Export Generator
 def generate_excel_report(df: pd.DataFrame, site_id: str, verdict_data: Dict[str, Any]) -> bytes:
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        # Sheet 1: Findings
         df.to_excel(writer, sheet_name="Audit Findings", index=False)
         
-        # Sheet 2: Executive Summary
         summary_df = pd.DataFrame([
             {"Metric": "Site ID", "Value": site_id},
             {"Metric": "Final Verdict", "Value": verdict_data["verdict"]},
@@ -515,7 +493,7 @@ def generate_excel_report(df: pd.DataFrame, site_id: str, verdict_data: Dict[str
     return output.getvalue()
 
 # ---------------------------------------------------------
-# STREAMLIT UI LAYOUT
+# UI Layout & Tab Logic
 # ---------------------------------------------------------
 st.set_page_config(page_title="Telecom Site Audit AI", page_icon="📡", layout="wide")
 
@@ -529,7 +507,7 @@ st.markdown("""
 tab_audit, tab_pm = st.tabs(["🔍 Field Audit & NTG", "📄 Multi-PM Analyzer"])
 
 # ---------------------------------------------------------
-# TAB 1: PRODUCTION FIELD AUDIT
+# TAB 1: ACCURATE FIELD AUDIT
 # ---------------------------------------------------------
 with tab_audit:
     st.subheader("📡 High-Precision Field Quality Audit")
@@ -546,192 +524,4 @@ with tab_audit:
         if not uploaded_files:
             st.warning("Please attach site photos to evaluate.")
         else:
-            gemini_key = st.secrets.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
-            if not gemini_key:
-                st.error("Missing GEMINI_API_KEY!")
-            else:
-                with st.spinner("🔍 Executing Audit Pipeline (Gated Detection, Deduplication & Supervisor Pass)..."):
-                    client = genai.Client(api_key=gemini_key)
-                    pil_images = [optimize_image(f) for f in uploaded_files]
-
-                    # Run production multi-agent pipeline
-                    audit_result = run_telecom_audit_pipeline(client, pil_images)
-                    verdict_data = calculate_verdict(audit_result["findings"], audit_result["photos"])
-                    verdict = verdict_data["verdict"]
-
-                    st.markdown("---")
-                    st.markdown("## Telecom Audit Report")
-                    st.write(f"### Site: {manual_site_input} | Subcontractor: {tech_name_input or 'N/A'}")
-                    
-                    # Verdict banner
-                    if verdict == "PASS":
-                        st.success(f"### Verdict: {verdict}")
-                    elif verdict == "PASS WITH CONCERNS":
-                        st.warning(f"### Verdict: {verdict}")
-                    else:
-                        st.error(f"### Verdict: {verdict}")
-
-                    # Verdict Breakdown Summary
-                    c1, c2, c3, c4 = st.columns(4)
-                    c1.metric("Critical Defects", verdict_data["critical_count"])
-                    c2.metric("Major Defects", verdict_data["major_count"])
-                    c3.metric("Minor Defects", verdict_data["minor_count"])
-                    c4.metric("Missing Mandatory Photos", len(verdict_data["missing_mandatory"]))
-
-                    # Asset Inventory Section
-                    st.markdown("### Detected Site Asset Inventory")
-                    st.info(", ".join(audit_result["assets"]) if audit_result["assets"] else "No major assets categorized.")
-
-                    # Photo Completeness Section
-                    st.markdown("### Photo Set Completeness Check")
-                    photo_df = pd.DataFrame([audit_result["photos"]]).T.reset_index()
-                    photo_df.columns = ["Photo View Requirement", "Submitted & Identified"]
-                    st.dataframe(photo_df, use_container_width=True)
-
-                    # Verified Findings Section
-                    st.write("### Verified Findings")
-                    if len(audit_result["findings"]) == 0:
-                        st.success("No verified defects identified.")
-                        findings_df = pd.DataFrame(columns=["photo_id", "severity", "asset", "category", "observation", "evidence", "confidence"])
-                    else:
-                        findings_df = pd.DataFrame(audit_result["findings"])
-                        cols = ["photo_id", "severity", "asset", "category", "observation", "evidence", "confidence"]
-                        findings_df = findings_df[[c for c in cols if c in findings_df.columns]]
-                        st.dataframe(findings_df, use_container_width=True)
-
-                    # Download Excel Report Button
-                    excel_data = generate_excel_report(findings_df, manual_site_input, verdict_data)
-                    st.download_button(
-                        label="📥 Download Excel Audit Report",
-                        data=excel_data,
-                        file_name=f"{manual_site_input}_Audit_Report.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
-
-# ---------------------------------------------------------
-# TAB 2: MULTI-PM ANALYZER
-# ---------------------------------------------------------
-with tab_pm:
-    st.subheader("📄 Multi-PM Checksheet Detailed Analyzer")
-    
-    uploaded_pdfs = st.file_uploader("Upload PM PDF Files", type=["pdf"], accept_multiple_files=True)
-
-    if uploaded_pdfs and st.button("🚀 Analyze All PM Checksheets", use_container_width=True):
-        gemini_key = st.secrets.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
-        if not gemini_key:
-            st.error("Missing GEMINI_API_KEY!")
-        else:
-            client = genai.Client(api_key=gemini_key)
-            all_site_data = []
-
-            STRICT_PM_SYSTEM_PROMPT = """
-You are a Senior Telecom Operations Supervisor auditing submitted Preventive Maintenance (PM) checksheets.
-Examine the provided text AND page images of the PM checksheets to identify specific, unique site non-conformities.
-
-RULES TO PREVENT REPETITION AND ENSURE ACCURACY:
-- Extract the exact Site ID and assign a confidence score (0-100) based on visual clarity.
-- DO NOT duplicate findings across array fields.
-- Use explicit, human-readable observation descriptions.
-"""
-            pm_schema = {
-                "type": "OBJECT",
-                "properties": {
-                    "site_id": {"type": "STRING"},
-                    "site_id_confidence": {"type": "INTEGER"},
-                    "vendor_technician": {"type": "STRING"},
-                    "pm_date": {"type": "STRING"},
-                    "verdict": {
-                        "type": "STRING",
-                        "enum": ["APPROVED", "APPROVED WITH CONCERNS", "REJECTED"]
-                    },
-                    "missing_equipment_photos": {
-                        "type": "ARRAY",
-                        "items": {"type": "STRING"}
-                    },
-                    "critical_remarks": {
-                        "type": "ARRAY",
-                        "items": {"type": "STRING"}
-                    },
-                    "supervisor_focus_notes": {
-                        "type": "ARRAY",
-                        "items": {"type": "STRING"}
-                    }
-                },
-                "required": ["site_id", "site_id_confidence", "vendor_technician", "pm_date", "verdict", "missing_equipment_photos", "critical_remarks", "supervisor_focus_notes"]
-            }
-
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-
-            for idx, pdf_file in enumerate(uploaded_pdfs):
-                status_text.text(f"⚙️ Extracting data from ({idx+1}/{len(uploaded_pdfs)}): {pdf_file.name}")
-                text_content, resized_page_images = process_and_resize_pdf(pdf_file, max_chars=25000, max_pages=15)
-                
-                payload = [f"FILENAME: {pdf_file.name}\nEXTRACTED CHECKLIST TEXT:\n{text_content}"]
-                if resized_page_images:
-                    payload.extend(resized_page_images)
-
-                gen_config = types.GenerateContentConfig(
-                    system_instruction=STRICT_PM_SYSTEM_PROMPT,
-                    temperature=0.0,
-                    top_p=0.1,
-                    max_output_tokens=4096,
-                    response_mime_type="application/json",
-                    response_schema=pm_schema
-                )
-
-                try:
-                    raw_response = generate_gemini_content_robust(client=client, contents=payload, config=gen_config)
-                    parsed = parse_gemini_json(raw_response.text)
-                    parsed["filename"] = pdf_file.name
-                    all_site_data.append(parsed)
-                except Exception as e:
-                    all_site_data.append({
-                        "filename": pdf_file.name,
-                        "site_id": "ERROR",
-                        "site_id_confidence": 0,
-                        "vendor_technician": "N/A",
-                        "pm_date": "N/A",
-                        "verdict": "REJECTED",
-                        "missing_equipment_photos": ["Failed to extract PDF"],
-                        "critical_remarks": [f"Parsing failure: {str(e)}"],
-                        "supervisor_focus_notes": ["Verify file integrity"]
-                    })
-
-                progress_bar.progress((idx + 1) / len(uploaded_pdfs))
-
-            status_text.success("Analysis Complete!")
-            st.session_state["pm_analysis_results"] = all_site_data
-
-    # Display Summary Table
-    if "pm_analysis_results" in st.session_state and st.session_state["pm_analysis_results"]:
-        results = st.session_state["pm_analysis_results"]
-        st.markdown("### 📋 Multi-PM Summary Table")
-        
-        summary_rows = []
-        for r in results:
-            summary_rows.append({
-                "Site ID": r.get("site_id", "N/A"),
-                "ID Confidence (%)": r.get("site_id_confidence", "N/A"),
-                "Technician": r.get("vendor_technician", "N/A"),
-                "Verdict": r.get("verdict", "N/A"),
-                "Missing Photos": ", ".join(r.get("missing_equipment_photos", [])),
-                "Critical Remarks": ", ".join(r.get("critical_remarks", [])),
-                "Action Items": ", ".join(r.get("supervisor_focus_notes", [])),
-                "File": r.get("filename", "")
-            })
-        
-        pm_df = pd.DataFrame(summary_rows)
-        st.dataframe(pm_df, use_container_width=True)
-
-        # Download PM Summary Excel
-        pm_excel_buffer = io.BytesIO()
-        with pd.ExcelWriter(pm_excel_buffer, engine="openpyxl") as writer:
-            pm_df.to_excel(writer, sheet_name="PM Checksheet Summary", index=False)
-        
-        st.download_button(
-            label="📥 Download PM Summary Excel",
-            data=pm_excel_buffer.getvalue(),
-            file_name="Multi_PM_Audit_Summary.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+            gemini_key = st.secrets.get("GEMINI_API_KEY") or
