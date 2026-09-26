@@ -135,7 +135,7 @@ def generate_gemini_content_robust(client, contents, config):
     candidate_models = []
     if configured_model:
         candidate_models.append(configured_model)
-    candidate_models.extend(["gemini-2.5-flash", "gemini-2.5-pro", "gemini-1.5-flash"])
+    candidate_models.extend(["gemini-2.5-flash", "gemini-2.5-pro", "gemini-3.5-flash"])
     
     seen = set()
     models_to_try = [m for m in candidate_models if not (m in seen or seen.add(m))]
