@@ -520,7 +520,7 @@ EXTRACT AND RETURN ONLY JSON MATCHING THIS EXACT SCHEMA:
     "Direct action required (e.g., 'Technician must return to clear vegetation within 3m buffer and upload close-up DG display photo')"
   ]
 }
-"""
+
 
             progress_bar = st.progress(0)
             status_text = st.empty()
@@ -580,3 +580,4 @@ EXTRACT AND RETURN ONLY JSON MATCHING THIS EXACT SCHEMA:
             })
         
         st.dataframe(pd.DataFrame(summary_rows), use_container_width=True)
+"""
