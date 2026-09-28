@@ -45,14 +45,30 @@ except ImportError:
         return []
 
 # ---------------------------------------------------------
-# Helper: Downscale & Compress Images (Keeps Payloads Small)
+# Persistent Client Initialization (Prevents Socket Drops)
+# ---------------------------------------------------------
+@st.cache_resource
+def get_gemini_client(api_key):
+    return genai.Client(
+        api_key=api_key,
+        http_options=types.HttpOptions(timeout=120000)
+    )
+
+@st.cache_resource
+def get_nvidia_client(api_key):
+    return OpenAI(
+        base_url="https://integrate.api.nvidia.com/v1",
+        api_key=api_key,
+        timeout=120.0
+    )
+
+# ---------------------------------------------------------
+# Helper: Downscale & Compress Images
 # ---------------------------------------------------------
 def optimize_image(uploaded_file, max_size=(600, 600), quality=60):
-    """Downscales images significantly to ensure fast, reliable API uploads."""
     img = Image.open(uploaded_file)
     if img.mode != 'RGB':
         img = img.convert('RGB')
-    
     img.thumbnail(max_size, Image.Resampling.LANCZOS)
     
     buffer = io.BytesIO()
@@ -60,18 +76,21 @@ def optimize_image(uploaded_file, max_size=(600, 600), quality=60):
     buffer.seek(0)
     return Image.open(buffer)
 
-def PIL_to_base64_data_url(pil_img, quality=60):
-    """Converts PIL Image to compressed Base64 Data URL."""
+def pil_to_bytes(pil_img, quality=60):
+    """Converts PIL Image to raw JPEG bytes for Gemini API."""
     buffer = io.BytesIO()
     pil_img.save(buffer, format="JPEG", quality=quality)
-    encoded = base64.b64encode(buffer.getvalue()).decode("utf-8")
+    return buffer.getvalue()
+
+def pil_to_base64_data_url(pil_img, quality=60):
+    """Converts PIL Image to Base64 Data URL for NVIDIA/OpenAI Vision."""
+    encoded = base64.b64encode(pil_to_bytes(pil_img, quality)).decode("utf-8")
     return f"data:image/jpeg;base64,{encoded}"
 
 # ---------------------------------------------------------
-# Helper: PDF Text & Low-Bandwidth Image Extractor
+# Helper: PDF Text & Image Extractor
 # ---------------------------------------------------------
-def process_and_resize_pdf(pdf_file, max_chars=4000, target_dpi=72, max_size=(600, 600)):
-    """Extracts text and renders low-resolution images from PDF pages."""
+def process_and_resize_pdf(pdf_file, max_chars=5000, target_dpi=72, max_size=(600, 600)):
     text_content = ""
     resized_images = []
 
@@ -154,22 +173,30 @@ def calculate_distance_km(lat1, lon1, lat2, lon2):
         return float('inf')
 
 # ---------------------------------------------------------
-# Helper: Unified AI Model Call Manager with Long Timeout
+# Helper: Unified AI Call Manager
 # ---------------------------------------------------------
-def run_ai_audit_call(provider, prompt, images, is_json=False):
-    """Handles API calls with explicit 120s timeout and reduced payload footprint."""
+def run_ai_audit_call(provider, prompt, text_content, pil_images=None, is_json=False):
+    """
+    Executes AI requests safely. Converts images to provider-native binary formats 
+    and separates text-only models (DeepSeek) from multimodal calls.
+    """
+    pil_images = pil_images or []
+
     if provider == "Google Gemini":
         gemini_key = st.secrets.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
         if not gemini_key:
             raise ValueError("Missing GEMINI_API_KEY!")
         
-        # Explicit 120-second timeout configuration
-        client = genai.Client(
-            api_key=gemini_key,
-            http_options=types.HttpOptions(timeout=120000)
-        )
+        client = get_gemini_client(gemini_key)
         configured_model = st.secrets.get("GEMINI_MODEL") or os.environ.get("GEMINI_MODEL") or "gemini-2.5-flash"
         
+        contents_payload = [text_content]
+        for img in pil_images:
+            img_bytes = pil_to_bytes(img)
+            contents_payload.append(
+                types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg")
+            )
+
         gen_config = types.GenerateContentConfig(
             system_instruction=prompt,
             temperature=0.0,
@@ -178,7 +205,7 @@ def run_ai_audit_call(provider, prompt, images, is_json=False):
         
         response = client.models.generate_content(
             model=configured_model,
-            contents=[*images],
+            contents=contents_payload,
             config=gen_config
         )
         return response.text
@@ -188,24 +215,15 @@ def run_ai_audit_call(provider, prompt, images, is_json=False):
         if not nvidia_key:
             raise ValueError("Missing NVIDIA_API_KEY!")
         
-        # Explicit 120-second timeout on OpenAI client
-        client = OpenAI(
-            base_url="[https://integrate.api.nvidia.com/v1](https://integrate.api.nvidia.com/v1)",
-            api_key=nvidia_key,
-            timeout=120.0
-        )
+        client = get_nvidia_client(nvidia_key)
         
-        messages_payload = [{"type": "text", "text": prompt}]
-        for img in images:
-            if isinstance(img, Image.Image):
-                b64_url = PIL_to_base64_data_url(img)
-                messages_payload.append({"type": "image_url", "image_url": {"url": b64_url}})
-            elif isinstance(img, str):
-                messages_payload.append({"type": "text", "text": img})
+        # DeepSeek is text-focused; pass text only to prevent HTTP connection disconnects
+        full_user_prompt = f"{prompt}\n\nDOCUMENT DATA:\n{text_content}"
+        messages_payload = [{"role": "user", "content": full_user_prompt}]
 
         response = client.chat.completions.create(
             model="deepseek-ai/deepseek-v4.1-flash",
-            messages=[{"role": "user", "content": messages_payload}],
+            messages=messages_payload,
             temperature=0.1,
             max_tokens=2048
         )
@@ -443,7 +461,8 @@ with tab_audit:
                     report_text = run_ai_audit_call(
                         provider=ai_provider,
                         prompt=SYSTEM_PROMPT,
-                        images=pil_images,
+                        text_content="",
+                        pil_images=pil_images,
                         is_json=False
                     )
 
@@ -460,7 +479,7 @@ with tab_audit:
                     st.error(f"Audit processing failed: {str(e)}")
 
 # ---------------------------------------------------------
-# TAB 2: Multi-PM Analyzer (Batch PDF Upload with Fallbacks)
+# TAB 2: Multi-PM Analyzer
 # ---------------------------------------------------------
 with tab_pm:
     st.subheader("📄 Multi-PM Checksheet Analyzer")
@@ -478,8 +497,8 @@ with tab_pm:
         if st.button("🚀 Process All PM PDFs", width="stretch"):
             all_site_data = []
 
-            BATCH_SYSTEM_PROMPT = """You are a senior telecom audit supervisor analyzing PM checksheets and attached site photos.
-Examine ALL text and image content inside the PDF for telecom standards.
+            BATCH_SYSTEM_PROMPT = """You are a senior telecom audit supervisor analyzing PM checksheets.
+Examine ALL text content inside the document for telecom standards.
 
 Return strictly concise, valid JSON matching this structure:
 {
@@ -499,31 +518,25 @@ Return strictly concise, valid JSON matching this structure:
                 status_text.text(f"⚙️ Processing ({idx+1}/{len(uploaded_pdfs)}): {pdf_file.name}")
                 
                 text_content, resized_page_images = process_and_resize_pdf(pdf_file)
-                
-                # Primary attempt: Text + first 2 low-res page images
-                payload = [f"FILENAME: {pdf_file.name}\nEXTRACTED TEXT:\n{text_content}"]
-                if resized_page_images:
-                    payload.extend(resized_page_images[:2])
+                full_text_payload = f"FILENAME: {pdf_file.name}\nEXTRACTED TEXT:\n{text_content}"
 
                 raw_response = None
                 last_err = None
 
-                # Retry Loop with Fallback Payload Size
+                # Perform call with retry logic
                 for attempt in range(3):
                     try:
                         raw_response = run_ai_audit_call(
                             provider=ai_provider,
                             prompt=BATCH_SYSTEM_PROMPT,
-                            images=payload,
+                            text_content=full_text_payload,
+                            pil_images=resized_page_images[:1] if ai_provider == "Google Gemini" else [],
                             is_json=True
                         )
                         if raw_response:
                             break
                     except Exception as e:
                         last_err = e
-                        # If connection drops, trim down payload to Text + 1 image for next attempt
-                        if len(payload) > 2:
-                            payload = payload[:2]
                         time.sleep(2)
 
                 if raw_response:
@@ -551,7 +564,7 @@ Return strictly concise, valid JSON matching this structure:
                         "verdict": "REJECTED",
                         "missing_equipment_photos": ["Network Timeout"],
                         "critical_remarks": [f"Connection failed after retries: {str(last_err)}"],
-                        "supervisor_focus_notes": ["Try switching provider in sidebar or uploading smaller PDF"]
+                        "supervisor_focus_notes": ["Verify API credentials in Streamlit secrets"]
                     })
 
                 progress_bar.progress((idx + 1) / len(uploaded_pdfs))
