@@ -25,12 +25,16 @@ from streamlit_js_eval import get_geolocation
 from supabase import create_client, Client
 from pypdf import PdfReader
 
-# Optional PyMuPDF (fitz) for rendering PDF pages as resized images
+# PyMuPDF import updated to modern pymupdf library
 try:
-    import fitz  # PyMuPDF
+    import pymupdf as fitz
     FITZ_AVAILABLE = True
 except ImportError:
-    FITZ_AVAILABLE = False
+    try:
+        import fitz
+        FITZ_AVAILABLE = True
+    except ImportError:
+        FITZ_AVAILABLE = False
 
 # Optional PyZBar for barcode/QR reading
 try:
@@ -412,7 +416,7 @@ with tab_audit:
                 with cols[idx % 6]:
                     st.image(file, width=80)
 
-    if st.button("📤 Run Audit & Submit", use_container_width=True, disabled=(not manual_site_input or not is_location_valid)):
+    if st.button("📤 Run Audit & Submit", width="stretch", disabled=(not manual_site_input or not is_location_valid)):
         if not uploaded_files:
             st.warning("Please attach at least one photo.")
         else:
@@ -479,7 +483,7 @@ with tab_pm:
     if uploaded_pdfs:
         st.info(f"📂 **{len(uploaded_pdfs)}** PDF file(s) loaded.")
 
-        if st.button("🚀 Process All PM PDFs", use_container_width=True):
+        if st.button("🚀 Process All PM PDFs", width="stretch"):
             all_site_data = []
 
             BATCH_SYSTEM_PROMPT = """You are a senior telecom audit supervisor analyzing PM checksheets and attached site photos.
@@ -506,30 +510,50 @@ Return strictly concise, valid JSON matching this structure:
                 
                 payload = [f"FILENAME: {pdf_file.name}\nEXTRACTED TEXT:\n{text_content}"]
                 if resized_page_images:
-                    payload.extend(resized_page_images[:4])
+                    payload.extend(resized_page_images[:3])
 
-                try:
-                    raw_response = run_ai_audit_call(
-                        provider=ai_provider,
-                        prompt=BATCH_SYSTEM_PROMPT,
-                        images=payload,
-                        is_json=True
-                    )
-                    
-                    parsed = parse_model_json(raw_response)
-                    parsed["filename"] = pdf_file.name
-                    all_site_data.append(parsed)
-                    
-                except Exception as e:
+                raw_response = None
+                last_err = None
+                for attempt in range(3):
+                    try:
+                        raw_response = run_ai_audit_call(
+                            provider=ai_provider,
+                            prompt=BATCH_SYSTEM_PROMPT,
+                            images=payload,
+                            is_json=True
+                        )
+                        if raw_response:
+                            break
+                    except Exception as e:
+                        last_err = e
+                        time.sleep(2)
+
+                if raw_response:
+                    try:
+                        parsed = parse_model_json(raw_response)
+                        parsed["filename"] = pdf_file.name
+                        all_site_data.append(parsed)
+                    except Exception as e:
+                        all_site_data.append({
+                            "filename": pdf_file.name,
+                            "site_id": "PARSE_ERR",
+                            "vendor_technician": "N/A",
+                            "pm_date": "N/A",
+                            "verdict": "REJECTED",
+                            "missing_equipment_photos": ["JSON Parsing Failure"],
+                            "critical_remarks": [f"Malformed JSON response: {str(e)}"],
+                            "supervisor_focus_notes": ["Check raw model output format"]
+                        })
+                else:
                     all_site_data.append({
                         "filename": pdf_file.name,
-                        "site_id": "ERROR",
+                        "site_id": "CONN_ERR",
                         "vendor_technician": "N/A",
                         "pm_date": "N/A",
                         "verdict": "REJECTED",
-                        "missing_equipment_photos": ["Error parsing report"],
-                        "critical_remarks": [f"Processing error: {str(e)}"],
-                        "supervisor_focus_notes": ["Verify document format or JSON truncation"]
+                        "missing_equipment_photos": ["Network Timeout"],
+                        "critical_remarks": [f"Connection failed after 3 attempts: {str(last_err)}"],
+                        "supervisor_focus_notes": ["Verify internet connection or switch AI provider in sidebar"]
                     })
 
                 progress_bar.progress((idx + 1) / len(uploaded_pdfs))
@@ -553,7 +577,7 @@ Return strictly concise, valid JSON matching this structure:
         } for r in results]
         
         df_summary = pd.DataFrame(summary_rows)
-        st.dataframe(df_summary, use_container_width=True)
+        st.dataframe(df_summary, width="stretch")
 
         st.download_button(
             label="📥 Download Multi-PM Summary (.xlsx)",
