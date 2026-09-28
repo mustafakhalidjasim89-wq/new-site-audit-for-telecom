@@ -63,7 +63,7 @@ def get_nvidia_client(api_key):
     )
 
 # ---------------------------------------------------------
-# Helper Functions: Image & PDF Processing
+# Helper Functions: Image Processing & Stitching
 # ---------------------------------------------------------
 def optimize_image(uploaded_file, max_size=(800, 800), quality=70):
     img = Image.open(uploaded_file)
@@ -85,6 +85,36 @@ def pil_to_base64(pil_img):
     buffer = io.BytesIO()
     pil_img.save(buffer, format="JPEG", quality=70)
     return base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+def stitch_images_to_grid(pil_images, cols=2, max_dim=1024):
+    """
+    Merges multiple PIL images into a single grid image to overcome 
+    single-image prompt limits enforced by endpoints like NVIDIA NIM.
+    """
+    if not pil_images:
+        return None
+    if len(pil_images) == 1:
+        return pil_images[0]
+
+    # Calculate grid dimensions
+    n_images = len(pil_images)
+    rows = (n_images + cols - 1) // cols
+
+    cell_w = max(img.width for img in pil_images)
+    cell_h = max(img.height for img in pil_images)
+
+    grid_w = cell_w * cols
+    grid_h = cell_h * rows
+
+    grid_img = Image.new('RGB', (grid_w, grid_h), color=(255, 255, 255))
+
+    for idx, img in enumerate(pil_images):
+        r = idx // cols
+        c = idx % cols
+        grid_img.paste(img, (c * cell_w, r * cell_h))
+
+    grid_img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
+    return grid_img
 
 def process_and_resize_pdf(pdf_file, max_chars=4000, target_dpi=150, max_size=(1024, 1024)):
     text_content = ""
@@ -174,35 +204,39 @@ def calculate_distance_km(lat1, lon1, lat2, lon2):
 # ---------------------------------------------------------
 def run_nemotron_pdf_parser(pdf_page_images):
     """
-    Uses NVIDIA nemotron-parse-2.0 to perform specialized OCR & document parsing.
+    Parses PDF pages via nvidia/nemotron-parse-2.0.
+    Executes page-by-page to comply with the 1-image per call constraint.
     """
     nvidia_key = st.secrets.get("NVIDIA_API_KEY") or os.environ.get("NVIDIA_API_KEY")
     if not nvidia_key:
         raise ValueError("Missing NVIDIA_API_KEY for nemotron-parse-2.0!")
 
     client = get_nvidia_client(nvidia_key)
+    extracted_markdown_pages = []
 
-    combined_messages = []
-    user_content = [
-        {"type": "text", "text": "Extract all document text, fields, checkboxes, site ID, technician name, and tabular checksheets accurately into standard Markdown format."}
-    ]
-
-    for img in pdf_page_images:
+    for page_num, img in enumerate(pdf_page_images):
         b64_str = pil_to_base64(img)
-        user_content.append({
-            "type": "image_url",
-            "image_url": {"url": f"data:image/jpeg;base64,{b64_str}"}
-        })
+        
+        # Exactly 1 image_url payload per call
+        messages = [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Extract all document text, fields, checkboxes, site ID, technician name, and tabular checksheets accurately into standard Markdown format."},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_str}"}}
+            ]
+        }]
 
-    combined_messages.append({"role": "user", "content": user_content})
+        response = client.chat.completions.create(
+            model="nvidia/nemotron-parse-2.0",
+            messages=messages,
+            temperature=0.0,
+            max_tokens=4096
+        )
+        
+        page_md = response.choices[0].message.content
+        extracted_markdown_pages.append(f"--- PAGE {page_num + 1} ---\n{page_md}")
 
-    response = client.chat.completions.create(
-        model="nvidia/nemotron-parse-2.0",
-        messages=combined_messages,
-        temperature=0.0,
-        max_tokens=4096
-    )
-    return response.choices[0].message.content
+    return "\n\n".join(extracted_markdown_pages)
 
 def run_ai_audit_call(provider, prompt, text_content, pil_images=None, is_json=False):
     pil_images = pil_images or []
@@ -216,6 +250,7 @@ def run_ai_audit_call(provider, prompt, text_content, pil_images=None, is_json=F
         configured_model = st.secrets.get("GEMINI_MODEL") or os.environ.get("GEMINI_MODEL") or "gemini-2.5-flash"
         
         contents_payload = [f"{prompt}\n\nDOCUMENT TEXT / CONTEXT:\n{text_content}"]
+        # Gemini handles native multi-image arrays
         for img in pil_images:
             img_bytes = pil_to_bytes(img)
             contents_payload.append(
@@ -242,8 +277,18 @@ def run_ai_audit_call(provider, prompt, text_content, pil_images=None, is_json=F
         
         client = get_nvidia_client(nvidia_key)
         
-        full_user_prompt = f"{prompt}\n\nDOCUMENT DATA:\n{text_content}"
-        messages_payload = [{"role": "user", "content": full_user_prompt}]
+        # Stitch multiple images into a 1-grid image if multiple photos are supplied
+        user_content = [{"type": "text", "text": f"{prompt}\n\nDOCUMENT DATA:\n{text_content}"}]
+        
+        if pil_images:
+            stitched_img = stitch_images_to_grid(pil_images)
+            b64_str = pil_to_base64(stitched_img)
+            user_content.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:image/jpeg;base64,{b64_str}"}
+            })
+
+        messages_payload = [{"role": "user", "content": user_content}]
 
         response = client.chat.completions.create(
             model="deepseek-ai/deepseek-v4.1-flash",
@@ -338,7 +383,7 @@ ai_provider = st.sidebar.selectbox(
     ["Google Gemini (Recommended)", "NVIDIA (DeepSeek V4.1)"]
 )
 
-st.sidebar.info("📄 PDF Parse Model: **NVIDIA nemotron-parse-2.0** (Active)")
+st.sidebar.info("📄 PDF Parse Model: **NVIDIA nemotron-parse-2.0** (Active - Single-Page Batch Enabled)")
 
 # ---------------------------------------------------------
 # 3. KML Dataset Loading
@@ -477,7 +522,7 @@ with tab_audit:
                     st.error(f"Audit processing failed: {str(e)}")
 
 # ---------------------------------------------------------
-# TAB 2: Multi-PM Analyzer (NVIDIA Nemotron Parse 2.0 Engine)
+# TAB 2: Multi-PM Analyzer (Nemotron Parse Engine)
 # ---------------------------------------------------------
 with tab_pm:
     st.subheader("📄 Multi-PM Checksheet Analyzer (Powered by Nemotron Parse 2.0)")
@@ -503,10 +548,10 @@ with tab_pm:
                 _, resized_page_images = process_and_resize_pdf(pdf_file)
 
                 try:
-                    # Step 1: High-precision OCR using Nemotron Parse 2.0
+                    # Step 1: High-precision OCR page-by-page via Nemotron Parse 2.0
                     parsed_markdown = run_nemotron_pdf_parser(resized_page_images)
 
-                    # Step 2: Convert extracted structured document markdown into JSON format
+                    # Step 2: Convert parsed Markdown into structured JSON format
                     JSON_EXTRACT_PROMPT = """You are a JSON formatting assistant. Read the provided document text and convert it strictly into JSON format:
 {
   "site_id": "Extracted Site ID",
@@ -585,7 +630,7 @@ with tab_combined:
     if st.button("⚡ Generate Combined Technical Report", width="stretch", disabled=(not comb_pdf or not comb_photos)):
         with st.spinner("Processing PDF via Nemotron & Analyzing Photos via Vision Engine..."):
             try:
-                # 1. Parse PDF with Nemotron Parse 2.0
+                # 1. Parse PDF page-by-page with Nemotron Parse 2.0
                 _, pdf_imgs = process_and_resize_pdf(comb_pdf)
                 extracted_pdf_text = run_nemotron_pdf_parser(pdf_imgs)
 
