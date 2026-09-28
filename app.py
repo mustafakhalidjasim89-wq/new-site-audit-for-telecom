@@ -258,9 +258,306 @@ st.set_page_config(
 )
 
 st.markdown("""
-    <style>
-    .block-container {
-        padding-top: 1.5rem;
-        padding-bottom: 1.5rem;
-        padding-left: 1rem;
-        padding-right
+<style>
+.block-container {
+    padding-top: 1.5rem;
+    padding-bottom: 1.5rem;
+    padding-left: 1rem;
+    padding-right: 1rem;
+    max-width: 950px;
+}
+.stApp {
+    background-color: #121417;
+    color: #e2e8f0;
+}
+.header-card {
+    background-color: #1e222b;
+    padding: 12px 16px;
+    border-radius: 8px;
+    margin-bottom: 12px;
+    border: 1px solid #2d3442;
+}
+.stButton>button {
+    background-color: #2563eb;
+    color: white;
+    border-radius: 6px;
+    border: none;
+    padding: 8px 16px;
+    font-weight: 600;
+}
+</style>
+""", unsafe_allow_html=True)
+
+# ---------------------------------------------------------
+# 2. Authentication System & Sidebar Controls
+# ---------------------------------------------------------
+USER_CREDENTIALS = {
+    "admin": "telecom2026",
+    "mustafa": "audit123",
+    "user": "asiacell123"
+}
+
+if "authenticated" not in st.session_state:
+    st.session_state["authenticated"] = False
+
+if not st.session_state["authenticated"]:
+    st.title("🔒 Telecom Site Audit AI - Login")
+    with st.form("login_form"):
+        username_input = st.text_input("Username").strip()
+        password_input = st.text_input("Password", type="password").strip()
+        if st.form_submit_button("Log In"):
+            if USER_CREDENTIALS.get(username_input) == password_input:
+                st.session_state["authenticated"] = True
+                st.session_state["logged_user"] = username_input
+                st.rerun()
+            else:
+                st.error("Invalid credentials.")
+    st.stop()
+
+# Sidebar Engine Options
+st.sidebar.title("⚙️ AI Engine Settings")
+ai_provider = st.sidebar.selectbox(
+    "Select Vision Model Provider",
+    ["Google Gemini", "NVIDIA (DeepSeek)"]
+)
+
+# ---------------------------------------------------------
+# 3. KML Loader
+# ---------------------------------------------------------
+KML_EXACT_PATH = os.path.join(BASE_DIR, "data", "sites.kml")
+
+@st.cache_data(ttl=300)
+def load_kml_dataset():
+    if os.path.exists(KML_EXACT_PATH):
+        return parse_telecom_kml(KML_EXACT_PATH)
+    return []
+
+df_sites = pd.DataFrame(load_kml_dataset())
+
+# ---------------------------------------------------------
+# 4. Header & Navigation Tabs
+# ---------------------------------------------------------
+st.markdown("""
+<div class='header-card'>
+    <h3 style='color: #38bdf8; margin:0;'>📡 Telecom Site Audit AI (NTG Tagging)</h3>
+    <p style='color: #94a3b8; margin:2px 0 0 0; font-size:12px;'>R3-BAG-CLS5 Supervisor Engine</p>
+</div>
+""", unsafe_allow_html=True)
+
+tab_audit, tab_pm = st.tabs(["🔍 Field Audit & NTG", "📄 Multi-PM Analyzer"])
+
+# ---------------------------------------------------------
+# TAB 1: Field Audit
+# ---------------------------------------------------------
+with tab_audit:
+    col_site, col_tech = st.columns(2)
+    with col_site:
+        manual_site_input = st.text_input("SITE ID", placeholder="BAG0123").strip().upper()
+    with col_tech:
+        tech_name_input = st.text_input("TECHNICIAN", placeholder="Tech Name").strip()
+
+    loc = get_geolocation()
+    user_lat, user_lon = (loc['coords']['latitude'], loc['coords']['longitude']) if loc and 'coords' in loc else (None, None)
+
+    is_location_valid = False
+    if manual_site_input == "BAG0000":
+        is_location_valid = True
+        st.success("🃏 Joker Test Site Active (BAG0000). GPS validation bypassed.")
+    elif manual_site_input and not df_sites.empty:
+        target_col = next((c for c in ['site_code', 'site_id', 'name'] if c in df_sites.columns), None)
+        if target_col:
+            matched = df_sites[df_sites[target_col].astype(str).str.strip().str.upper() == manual_site_input]
+            if not matched.empty:
+                site_lat, site_lon = matched.iloc[0].get('latitude'), matched.iloc[0].get('longitude')
+                if site_lat and site_lon and user_lat and user_lon:
+                    dist_m = int(calculate_distance_km(user_lat, user_lon, site_lat, site_lon) * 1000)
+                    if dist_m <= 200:
+                        is_location_valid = True
+                        st.success(f"✅ GPS Validated ({dist_m}m away).")
+                    else:
+                        st.error(f"❌ GPS Mismatch: {dist_m}m away. Must be < 200m.")
+                else:
+                    st.warning("⚠️ GPS signal needed for validation.")
+            else:
+                is_location_valid = True
+        else:
+            is_location_valid = True
+    elif manual_site_input:
+        is_location_valid = True
+
+    if "captured_photos" not in st.session_state:
+        st.session_state["captured_photos"] = []
+
+    uploaded_files = []
+    if manual_site_input and is_location_valid:
+        input_mode = st.radio("Input Source:", ["Camera", "Gallery"], horizontal=True)
+        if input_mode == "Camera":
+            img_file = st.camera_input("Take Picture")
+            if img_file and not any(p.getvalue() == img_file.getvalue() for p in st.session_state["captured_photos"]):
+                st.session_state["captured_photos"].append(img_file)
+
+            if st.button("🗑️ Clear All"):
+                st.session_state["captured_photos"] = []
+                st.rerun()
+
+            uploaded_files = st.session_state["captured_photos"]
+        else:
+            img_files = st.file_uploader("Upload photos", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
+            if img_files:
+                uploaded_files.extend(img_files)
+
+        if uploaded_files:
+            cols = st.columns(6)
+            for idx, file in enumerate(uploaded_files):
+                with cols[idx % 6]:
+                    st.image(file, width=80)
+
+    if st.button("📤 Run Audit & Submit", use_container_width=True, disabled=(not manual_site_input or not is_location_valid)):
+        if not uploaded_files:
+            st.warning("Please attach at least one photo.")
+        else:
+            with st.spinner(f"⚡ Processing Audit using {ai_provider}..."):
+                try:
+                    pil_images = [optimize_image(f) for f in uploaded_files]
+
+                    SYSTEM_PROMPT = (
+                        f"You are a telecom audit engineer inspecting physical equipment, mandatory site assets, photo quality, and NTG Asset Tagging.\n"
+                        f"Analyzing Site ID: {manual_site_input} | Technician: {tech_name_input or 'Unassigned'}\n\n"
+                        f"MANDATORY DIRECTIVE: Adhere strictly to operational standards:\n"
+                        f"1. Tower Elevation & Photo Compliance: Close-range photos required for elevated assets.\n"
+                        f"2. Cable Dressing & Containment: Neat routing inside trays, secure trunking covers.\n"
+                        f"3. Site Housekeeping: Clear vegetation buffer, remove abandoned cables and scrap.\n"
+                        f"4. Mandatory Assets: Check DG, Power Cabinet, Rectifiers, Batteries, Microwave.\n\n"
+                        f"MANDATORY OUTPUT FORMAT:\n"
+                        f"### 1. EQUIPMENT QUANTITY COUNT & AUDIT\n"
+                        f"| Equipment / Asset Description | Identified Model / Brand | Quantities Detected | Photo Status (Clear / Blurry / Missing) |\n"
+                        f"| :--- | :--- | :--- | :--- |\n\n"
+                        f"### 2. MISSING OR UNCLEAR EQUIPMENT PHOTOS\n"
+                        f"- **Unclear / Poor Quality Photos:** List issues.\n"
+                        f"- **Missing Mandatory Photos:** Explicitly state missing photos.\n\n"
+                        f"### 3. NTG ASSET TAGGING & BARCODE VERIFICATION\n"
+                        f"- **Equipment Identifiers:** Describe visible NTG labels.\n"
+                        f"- **Cable & Port Labels:** Describe port labels.\n\n"
+                        f"### 4. FINAL VERDICT & DEFECTS\n"
+                        f"- **Final Verdict:** [PASS / PASS WITH CONCERNS / FAIL]\n"
+                        f"- **Identified Defects:** Detail all violations.\n"
+                        f"- **Corrective Actions:** Remediation steps."
+                    )
+
+                    report_text = run_ai_audit_call(
+                        provider=ai_provider,
+                        prompt=SYSTEM_PROMPT,
+                        images=pil_images,
+                        is_json=False
+                    )
+
+                    if report_text:
+                        st.subheader("📋 Audit Report")
+                        st.markdown(report_text)
+                        
+                        status_verdict = "FAIL" if "FAIL" in report_text.upper() else ("PASS WITH CONCERNS" if "CONCERNS" in report_text.upper() else "PASS")
+                        if save_report_to_supabase(manual_site_input, tech_name_input or 'Unassigned', status_verdict, report_text, user_lat, user_lon):
+                            st.success("✅ Audit logged successfully to Supabase!")
+                            st.session_state["captured_photos"] = []
+
+                except Exception as e:
+                    st.error(f"Audit processing failed: {str(e)}")
+
+# ---------------------------------------------------------
+# TAB 2: Multi-PM Analyzer (Batch PDF Upload)
+# ---------------------------------------------------------
+with tab_pm:
+    st.subheader("📄 Multi-PM Checksheet Analyzer")
+    
+    uploaded_pdfs = st.file_uploader(
+        "Upload Multiple PM PDF Files",
+        type=["pdf"],
+        accept_multiple_files=True,
+        help="Upload one or multiple PM checksheets simultaneously."
+    )
+
+    if uploaded_pdfs:
+        st.info(f"📂 **{len(uploaded_pdfs)}** PDF file(s) loaded.")
+
+        if st.button("🚀 Process All PM PDFs", use_container_width=True):
+            all_site_data = []
+
+            BATCH_SYSTEM_PROMPT = """You are a senior telecom audit supervisor analyzing PM checksheets and attached site photos.
+Examine ALL text and image content inside the PDF for telecom standards.
+
+Return strictly concise, valid JSON matching this structure:
+{
+  "site_id": "Extracted Site ID (e.g., ANB3872)",
+  "vendor_technician": "Technician Name",
+  "pm_date": "YYYY-MM-DD",
+  "verdict": "APPROVED" | "APPROVED WITH CONCERNS" | "REJECTED",
+  "missing_equipment_photos": ["List missing/unclear photos"],
+  "critical_remarks": ["Detailed defect statements"],
+  "supervisor_focus_notes": ["Specific corrective actions required"]
+}"""
+
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+
+            for idx, pdf_file in enumerate(uploaded_pdfs):
+                status_text.text(f"⚙️ Processing ({idx+1}/{len(uploaded_pdfs)}): {pdf_file.name}")
+                
+                text_content, resized_page_images = process_and_resize_pdf(pdf_file)
+                
+                payload = [f"FILENAME: {pdf_file.name}\nEXTRACTED TEXT:\n{text_content}"]
+                if resized_page_images:
+                    payload.extend(resized_page_images[:4])
+
+                try:
+                    raw_response = run_ai_audit_call(
+                        provider=ai_provider,
+                        prompt=BATCH_SYSTEM_PROMPT,
+                        images=payload,
+                        is_json=True
+                    )
+                    
+                    parsed = parse_model_json(raw_response)
+                    parsed["filename"] = pdf_file.name
+                    all_site_data.append(parsed)
+                    
+                except Exception as e:
+                    all_site_data.append({
+                        "filename": pdf_file.name,
+                        "site_id": "ERROR",
+                        "vendor_technician": "N/A",
+                        "pm_date": "N/A",
+                        "verdict": "REJECTED",
+                        "missing_equipment_photos": ["Error parsing report"],
+                        "critical_remarks": [f"Processing error: {str(e)}"],
+                        "supervisor_focus_notes": ["Verify document format or JSON truncation"]
+                    })
+
+                progress_bar.progress((idx + 1) / len(uploaded_pdfs))
+
+            status_text.success("✅ All PM files processed successfully!")
+            st.session_state["pm_analysis_results"] = all_site_data
+
+    if "pm_analysis_results" in st.session_state and st.session_state["pm_analysis_results"]:
+        results = st.session_state["pm_analysis_results"]
+        st.markdown("### 📋 Multi-PM Audit Summary")
+        
+        summary_rows = [{
+            "Site ID": r.get("site_id", "N/A"),
+            "Technician": r.get("vendor_technician", "N/A"),
+            "Date": r.get("pm_date", "N/A"),
+            "Verdict": r.get("verdict", "N/A"),
+            "Missing/Unclear Photos": " | ".join(r.get("missing_equipment_photos", [])) if isinstance(r.get("missing_equipment_photos"), list) else str(r.get("missing_equipment_photos", "")),
+            "Critical Remarks": " | ".join(r.get("critical_remarks", [])) if isinstance(r.get("critical_remarks"), list) else str(r.get("critical_remarks", "")),
+            "Focus Actions": " | ".join(r.get("supervisor_focus_notes", [])) if isinstance(r.get("supervisor_focus_notes"), list) else str(r.get("supervisor_focus_notes", "")),
+            "Filename": r.get("filename", "")
+        } for r in results]
+        
+        df_summary = pd.DataFrame(summary_rows)
+        st.dataframe(df_summary, use_container_width=True)
+
+        st.download_button(
+            label="📥 Download Multi-PM Summary (.xlsx)",
+            data=convert_df_to_excel(df_summary, sheet_name='PM_Summary'),
+            file_name="Multi_PM_Summary.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
