@@ -4,28 +4,23 @@ import io
 import time
 import re
 import json
-import smtplib
 import base64
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 
 import streamlit as st
 import pandas as pd
 import numpy as np
-import cv2
 from PIL import Image
 from math import radians, cos, sin, asin, sqrt
 
 from google import genai
 from google.genai import types
-from google.genai.errors import APIError
 from openai import OpenAI
 
 from streamlit_js_eval import get_geolocation
 from supabase import create_client, Client
 from pypdf import PdfReader
 
-# PyMuPDF import updated to modern pymupdf library
+# Modern PyMuPDF import
 try:
     import pymupdf as fitz
     FITZ_AVAILABLE = True
@@ -35,13 +30,6 @@ except ImportError:
         FITZ_AVAILABLE = True
     except ImportError:
         FITZ_AVAILABLE = False
-
-# Optional PyZBar for barcode/QR reading
-try:
-    from pyzbar.pyzbar import decode as pyzbar_decode
-    PYZBAR_AVAILABLE = True
-except ImportError:
-    PYZBAR_AVAILABLE = False
 
 # ---------------------------------------------------------
 # 0. Path Resolution & Setup
@@ -57,10 +45,10 @@ except ImportError:
         return []
 
 # ---------------------------------------------------------
-# Helper: Aggressive Image Optimization & Base64
+# Helper: Downscale & Compress Images (Keeps Payloads Small)
 # ---------------------------------------------------------
-def optimize_image(uploaded_file, max_size=(800, 800), quality=75):
-    """Downscales and compresses images to lower bandwidth usage."""
+def optimize_image(uploaded_file, max_size=(600, 600), quality=60):
+    """Downscales images significantly to ensure fast, reliable API uploads."""
     img = Image.open(uploaded_file)
     if img.mode != 'RGB':
         img = img.convert('RGB')
@@ -72,18 +60,18 @@ def optimize_image(uploaded_file, max_size=(800, 800), quality=75):
     buffer.seek(0)
     return Image.open(buffer)
 
-def PIL_to_base64_data_url(pil_img, quality=75):
-    """Converts PIL Image to Base64 Data URL for OpenAI/NVIDIA API."""
+def PIL_to_base64_data_url(pil_img, quality=60):
+    """Converts PIL Image to compressed Base64 Data URL."""
     buffer = io.BytesIO()
     pil_img.save(buffer, format="JPEG", quality=quality)
     encoded = base64.b64encode(buffer.getvalue()).decode("utf-8")
     return f"data:image/jpeg;base64,{encoded}"
 
 # ---------------------------------------------------------
-# Helper: PDF Text & Resized Image Extractor
+# Helper: PDF Text & Low-Bandwidth Image Extractor
 # ---------------------------------------------------------
-def process_and_resize_pdf(pdf_file, max_chars=6000, target_dpi=100, max_size=(800, 800)):
-    """Extracts text and converts PDF pages into downscaled images."""
+def process_and_resize_pdf(pdf_file, max_chars=4000, target_dpi=72, max_size=(600, 600)):
+    """Extracts text and renders low-resolution images from PDF pages."""
     text_content = ""
     resized_images = []
 
@@ -100,7 +88,7 @@ def process_and_resize_pdf(pdf_file, max_chars=6000, target_dpi=100, max_size=(8
 
         text_content = re.sub(r'\s+', ' ', raw_text).strip()
         if len(text_content) > max_chars:
-            text_content = text_content[:max_chars] + "... [TRUNCATED FOR SPEED]"
+            text_content = text_content[:max_chars] + "... [TRUNCATED]"
 
         if FITZ_AVAILABLE:
             doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -110,7 +98,7 @@ def process_and_resize_pdf(pdf_file, max_chars=6000, target_dpi=100, max_size=(8
                 img.thumbnail(max_size, Image.Resampling.LANCZOS)
                 
                 buf = io.BytesIO()
-                img.save(buf, format="JPEG", quality=70, optimize=True)
+                img.save(buf, format="JPEG", quality=50, optimize=True)
                 buf.seek(0)
                 resized_images.append(Image.open(buf))
 
@@ -123,7 +111,6 @@ def process_and_resize_pdf(pdf_file, max_chars=6000, target_dpi=100, max_size=(8
 # Helper: Robust JSON Output Parser
 # ---------------------------------------------------------
 def parse_model_json(raw_text):
-    """Cleans markdown formatting and repairs common JSON truncation errors."""
     if not raw_text:
         raise ValueError("Empty response received from model.")
     
@@ -167,16 +154,20 @@ def calculate_distance_km(lat1, lon1, lat2, lon2):
         return float('inf')
 
 # ---------------------------------------------------------
-# Helper: Unified AI Model Call Manager
+# Helper: Unified AI Model Call Manager with Long Timeout
 # ---------------------------------------------------------
 def run_ai_audit_call(provider, prompt, images, is_json=False):
-    """Handles prompt + image execution across Gemini and NVIDIA API formats."""
+    """Handles API calls with explicit 120s timeout and reduced payload footprint."""
     if provider == "Google Gemini":
         gemini_key = st.secrets.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
         if not gemini_key:
             raise ValueError("Missing GEMINI_API_KEY!")
         
-        client = genai.Client(api_key=gemini_key)
+        # Explicit 120-second timeout configuration
+        client = genai.Client(
+            api_key=gemini_key,
+            http_options=types.HttpOptions(timeout=120000)
+        )
         configured_model = st.secrets.get("GEMINI_MODEL") or os.environ.get("GEMINI_MODEL") or "gemini-2.5-flash"
         
         gen_config = types.GenerateContentConfig(
@@ -197,9 +188,11 @@ def run_ai_audit_call(provider, prompt, images, is_json=False):
         if not nvidia_key:
             raise ValueError("Missing NVIDIA_API_KEY!")
         
+        # Explicit 120-second timeout on OpenAI client
         client = OpenAI(
             base_url="[https://integrate.api.nvidia.com/v1](https://integrate.api.nvidia.com/v1)",
-            api_key=nvidia_key
+            api_key=nvidia_key,
+            timeout=120.0
         )
         
         messages_payload = [{"type": "text", "text": prompt}]
@@ -318,7 +311,6 @@ if not st.session_state["authenticated"]:
                 st.error("Invalid credentials.")
     st.stop()
 
-# Sidebar Engine Options
 st.sidebar.title("⚙️ AI Engine Settings")
 ai_provider = st.sidebar.selectbox(
     "Select Vision Model Provider",
@@ -468,7 +460,7 @@ with tab_audit:
                     st.error(f"Audit processing failed: {str(e)}")
 
 # ---------------------------------------------------------
-# TAB 2: Multi-PM Analyzer (Batch PDF Upload)
+# TAB 2: Multi-PM Analyzer (Batch PDF Upload with Fallbacks)
 # ---------------------------------------------------------
 with tab_pm:
     st.subheader("📄 Multi-PM Checksheet Analyzer")
@@ -508,12 +500,15 @@ Return strictly concise, valid JSON matching this structure:
                 
                 text_content, resized_page_images = process_and_resize_pdf(pdf_file)
                 
+                # Primary attempt: Text + first 2 low-res page images
                 payload = [f"FILENAME: {pdf_file.name}\nEXTRACTED TEXT:\n{text_content}"]
                 if resized_page_images:
-                    payload.extend(resized_page_images[:3])
+                    payload.extend(resized_page_images[:2])
 
                 raw_response = None
                 last_err = None
+
+                # Retry Loop with Fallback Payload Size
                 for attempt in range(3):
                     try:
                         raw_response = run_ai_audit_call(
@@ -526,6 +521,9 @@ Return strictly concise, valid JSON matching this structure:
                             break
                     except Exception as e:
                         last_err = e
+                        # If connection drops, trim down payload to Text + 1 image for next attempt
+                        if len(payload) > 2:
+                            payload = payload[:2]
                         time.sleep(2)
 
                 if raw_response:
@@ -552,8 +550,8 @@ Return strictly concise, valid JSON matching this structure:
                         "pm_date": "N/A",
                         "verdict": "REJECTED",
                         "missing_equipment_photos": ["Network Timeout"],
-                        "critical_remarks": [f"Connection failed after 3 attempts: {str(last_err)}"],
-                        "supervisor_focus_notes": ["Verify internet connection or switch AI provider in sidebar"]
+                        "critical_remarks": [f"Connection failed after retries: {str(last_err)}"],
+                        "supervisor_focus_notes": ["Try switching provider in sidebar or uploading smaller PDF"]
                     })
 
                 progress_bar.progress((idx + 1) / len(uploaded_pdfs))
