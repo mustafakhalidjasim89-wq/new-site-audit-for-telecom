@@ -16,6 +16,7 @@ opencv-python-headless
 Pillow
 google-genai
 streamlit-js-eval
+openai
 supabase
 pypdf
 PyMuPDF
