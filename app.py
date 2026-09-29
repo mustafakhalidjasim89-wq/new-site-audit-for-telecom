@@ -1,796 +1,638 @@
-import base64
-import io
-import json
-import os
-import re
 import sys
+import os
+import io
 import time
-from math import asin, cos, radians, sin, sqrt
+import re
+import json
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+
+import streamlit as st
+import pandas as pd
+import numpy as np
+import cv2
+from PIL import Image
+from math import radians, cos, sin, asin, sqrt
 
 from google import genai
 from google.genai import types
-import numpy as np
-from openai import OpenAI
-import pandas as pd
-from PIL import Image
-from pypdf import PdfReader
-import streamlit as st
-from streamlit_js_eval import get_geolocation
-from supabase import Client, create_client
+from google.genai.errors import APIError
 
-# PyMuPDF Import
+from streamlit_js_eval import get_geolocation
+from supabase import create_client, Client
+from pypdf import PdfReader
+
+# Optional PyMuPDF (fitz) for rendering PDF pages as resized images
 try:
-  import fitz
-  FITZ_AVAILABLE = True
-except ImportError:
-  try:
-    import fitz
+    import fitz  # PyMuPDF
     FITZ_AVAILABLE = True
-  except ImportError:
+except ImportError:
     FITZ_AVAILABLE = False
 
+# Optional PyZBar for barcode/QR reading
+try:
+    from pyzbar.pyzbar import decode as pyzbar_decode
+    PYZBAR_AVAILABLE = True
+except ImportError:
+    PYZBAR_AVAILABLE = False
+
 # ---------------------------------------------------------
-# 0. Path Resolution & KML Setup
+# 0. Path Resolution & Setup
 # ---------------------------------------------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 if BASE_DIR not in sys.path:
-  sys.path.append(BASE_DIR)
+    sys.path.append(BASE_DIR)
 
 try:
-  from kml_parser import parse_telecom_kml
+    from kml_parser import parse_telecom_kml
 except ImportError:
-
-  def parse_telecom_kml(path):
-    return []
-
+    def parse_telecom_kml(path):
+        return []
 
 # ---------------------------------------------------------
-# Persistent Client Initializations
+# Helper: Aggressive Image Optimization
 # ---------------------------------------------------------
-@st.cache_resource
-def get_gemini_client(api_key):
-  return genai.Client(
-      api_key=api_key, http_options=types.HttpOptions(timeout=120000)
-  )
-
-
-@st.cache_resource
-def get_nvidia_client(api_key):
-  return OpenAI(
-      base_url="https://integrate.api.nvidia.com/v1",
-      api_key=api_key,
-      timeout=120.0,
-  )
-
+def optimize_image(uploaded_file, max_size=(800, 800), quality=75):
+    """Downscales and compresses images to lower bandwidth usage."""
+    img = Image.open(uploaded_file)
+    if img.mode != 'RGB':
+        img = img.convert('RGB')
+    
+    img.thumbnail(max_size, Image.Resampling.LANCZOS)
+    
+    buffer = io.BytesIO()
+    img.save(buffer, format="JPEG", quality=quality, optimize=True)
+    buffer.seek(0)
+    return Image.open(buffer)
 
 # ---------------------------------------------------------
-# Helper Functions: Image Processing & Stitching
+# Helper: PDF Text & Resized Image Extractor
 # ---------------------------------------------------------
-def optimize_image(uploaded_file, max_size=(800, 800), quality=70):
-  img = Image.open(uploaded_file)
-  if img.mode != "RGB":
-    img = img.convert("RGB")
-  img.thumbnail(max_size, Image.Resampling.LANCZOS)
+def process_and_resize_pdf(pdf_file, max_chars=6000, target_dpi=100, max_size=(800, 800)):
+    """
+    Extracts text and converts scanned PDF pages into downscaled JPEG images.
+    Drastically decreases payload size and execution latency.
+    """
+    text_content = ""
+    resized_images = []
 
-  buffer = io.BytesIO()
-  img.save(buffer, format="JPEG", quality=quality, optimize=True)
-  buffer.seek(0)
-  return Image.open(buffer)
-
-
-def pil_to_bytes(pil_img, quality=70):
-  buffer = io.BytesIO()
-  pil_img.save(buffer, format="JPEG", quality=quality)
-  return buffer.getvalue()
-
-
-def pil_to_base64(pil_img):
-  buffer = io.BytesIO()
-  pil_img.save(buffer, format="JPEG", quality=70)
-  return base64.b64encode(buffer.getvalue()).decode("utf-8")
-
-
-def stitch_images_to_grid(pil_images, cols=2, max_dim=1024):
-  """Merges multiple PIL images into a single grid image to overcome
-
-  single-image prompt limits enforced by endpoints like NVIDIA NIM.
-  """
-  if not pil_images:
-    return None
-  if len(pil_images) == 1:
-    return pil_images[0]
-
-  n_images = len(pil_images)
-  rows = (n_images + cols - 1) // cols
-
-  cell_w = max(img.width for img in pil_images)
-  cell_h = max(img.height for img in pil_images)
-
-  grid_w = cell_w * cols
-  grid_h = cell_h * rows
-
-  grid_img = Image.new("RGB", (grid_w, grid_h), color=(255, 255, 255))
-
-  for idx, img in enumerate(pil_images):
-    r = idx // cols
-    c = idx % cols
-    grid_img.paste(img, (c * cell_w, r * cell_h))
-
-  grid_img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
-  return grid_img
-
-
-def process_and_resize_pdf(
-    pdf_file, max_chars=4000, target_dpi=150, max_size=(1024, 1024)
-):
-  text_content = ""
-  page_images = []
-
-  try:
-    pdf_bytes = pdf_file.read()
-    pdf_file.seek(0)
-
-    reader = PdfReader(io.BytesIO(pdf_bytes))
-    raw_text = ""
-    for page in reader.pages:
-      t = page.extract_text()
-      if t:
-        raw_text += t + "\n"
-
-    text_content = re.sub(r"\s+", " ", raw_text).strip()
-    if len(text_content) > max_chars:
-      text_content = text_content[:max_chars] + "... [TRUNCATED]"
-
-    if FITZ_AVAILABLE:
-      doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-      for page in doc:
-        pix = page.get_pixmap(dpi=target_dpi)
-        img = Image.open(io.BytesIO(pix.tobytes("jpeg")))
-        img.thumbnail(max_size, Image.Resampling.LANCZOS)
-
-        buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=75, optimize=True)
-        buf.seek(0)
-        page_images.append(Image.open(buf))
-
-  except Exception as e:
-    st.error(f"Error processing PDF '{pdf_file.name}': {str(e)}")
-
-  return text_content, page_images
-
-
-# ---------------------------------------------------------
-# Helper: JSON Repair & Parsing
-# ---------------------------------------------------------
-def parse_model_json(raw_text):
-  if not raw_text:
-    raise ValueError("Empty response received from model.")
-
-  cleaned = re.sub(r"```(?:json)?", "", raw_text, flags=re.IGNORECASE).strip()
-  cleaned = cleaned.strip("`")
-
-  try:
-    return json.loads(cleaned)
-  except json.JSONDecodeError:
-    pass
-
-  match = re.search(r"\{.*\}", cleaned, re.DOTALL)
-  if match:
     try:
-      return json.loads(match.group(0))
+        pdf_bytes = pdf_file.read()
+        pdf_file.seek(0)
+
+        # 1. Extract and clean text using PyPDF
+        reader = PdfReader(io.BytesIO(pdf_bytes))
+        raw_text = ""
+        for page in reader.pages:
+            t = page.extract_text()
+            if t:
+                raw_text += t + "\n"
+
+        text_content = re.sub(r'\s+', ' ', raw_text).strip()
+        if len(text_content) > max_chars:
+            text_content = text_content[:max_chars] + "... [TRUNCATED FOR SPEED]"
+
+        # 2. Render and resize PDF pages as images if PyMuPDF is available
+        if FITZ_AVAILABLE:
+            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+            for page in doc:
+                pix = page.get_pixmap(dpi=target_dpi)
+                img = Image.open(io.BytesIO(pix.tobytes("jpeg")))
+                img.thumbnail(max_size, Image.Resampling.LANCZOS)
+                
+                buf = io.BytesIO()
+                img.save(buf, format="JPEG", quality=70, optimize=True)
+                buf.seek(0)
+                resized_images.append(Image.open(buf))
+
+    except Exception as e:
+        st.error(f"Error processing PDF '{pdf_file.name}': {str(e)}")
+
+    return text_content, resized_images
+
+# ---------------------------------------------------------
+# Helper: Robust JSON Output Parser & Repair Engine
+# ---------------------------------------------------------
+def parse_gemini_json(raw_text):
+    """
+    Cleans markdown formatting and repairs common JSON truncation or escaping errors.
+    Prevents 'Unterminated string' crashes when Gemini outputs dense logs.
+    """
+    if not raw_text:
+        raise ValueError("Empty response received from Gemini.")
+    
+    # 1. Strip Markdown standard code blocks
+    cleaned = re.sub(r"```(?:json)?", "", raw_text, flags=re.IGNORECASE).strip()
+    cleaned = cleaned.strip("`")
+
+    # 2. Direct JSON Parse
+    try:
+        return json.loads(cleaned)
     except json.JSONDecodeError:
-      pass
+        pass
 
-  try:
-    repaired = cleaned.strip()
-    repaired = re.sub(r",\s*([\]}])", r"\1", repaired)
-    if repaired.count('"') % 2 != 0:
-      repaired += '"'
-    open_brackets = repaired.count("[") - repaired.count("]")
-    if open_brackets > 0:
-      repaired += "]" * open_brackets
-    open_braces = repaired.count("{") - repaired.count("}")
-    if open_braces > 0:
-      repaired += "}" * open_braces
+    # 3. Extract JSON object substring via Regex
+    match = re.search(r'\{.*\}', cleaned, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group(0))
+        except json.JSONDecodeError:
+            pass
 
-    return json.loads(repaired)
-  except Exception:
-    raise ValueError(f"Unparseable output from model: {raw_text[:120]}...")
+    # 4. Attempt tail-repair for truncated strings or missing brackets
+    try:
+        repaired = cleaned.strip()
+        repaired = re.sub(r',\s*([\]}])', r'\1', repaired)
+        if not repaired.endswith("}"):
+            if not repaired.endswith('"') and not repaired.endswith(']'):
+                repaired += '"'
+            if not repaired.endswith("}"):
+                repaired += "\n}"
+        return json.loads(repaired)
+    except Exception:
+        raise ValueError(f"Unparseable output from model: {raw_text[:120]}...")
 
-
+# ---------------------------------------------------------
+# Helper: Distance Calculation
+# ---------------------------------------------------------
 def calculate_distance_km(lat1, lon1, lat2, lon2):
-  try:
-    lat1, lon1, lat2, lon2 = map(
-        radians, [float(lat1), float(lon1), float(lat2), float(lon2)]
-    )
-    dlat, dlon = lat2 - lat1, lon2 - lon1
-    a = sin(dlat / 2) ** 2 + cos(lat1) * cos(lat2) * sin(dlon / 2) ** 2
-    return 2 * asin(sqrt(a)) * 6371.0
-  except (ValueError, TypeError):
-    return float("inf")
-
+    try:
+        lat1, lon1, lat2, lon2 = map(radians, [float(lat1), float(lon1), float(lat2), float(lon2)])
+        dlat, dlon = lat2 - lat1, lon2 - lon1
+        a = sin(dlat / 2)**2 + cos(lat1) * cos(lat2) * sin(dlon / 2)**2
+        return 2 * asin(sqrt(a)) * 6371.0
+    except (ValueError, TypeError):
+        return float('inf')
 
 # ---------------------------------------------------------
-# AI Execution Pipelines
+# Helper: Dynamic Model Selection and Generation
 # ---------------------------------------------------------
-def run_nemotron_pdf_parser(pdf_page_images):
-  """Parses PDF pages via nvidia/nemotron-parse-2.0.
+def generate_gemini_content_robust(client, contents, config):
+    configured_model = st.secrets.get("GEMINI_MODEL") or os.environ.get("GEMINI_MODEL")
+    candidate_models = []
+    
+    if configured_model:
+        candidate_models.append(configured_model)
+    
+    candidate_models.extend(["gemini-2.5-flash", "gemini-2.5-pro", "gemini-1.5-flash"])
+    
+    seen = set()
+    models_to_try = [m for m in candidate_models if not (m in seen or seen.add(m))]
 
-  Executes page-by-page to comply with the 1-image per call constraint.
-  """
-  nvidia_key = st.secrets.get("NVIDIA_API_KEY") or os.environ.get(
-      "NVIDIA_API_KEY"
-  )
-  if not nvidia_key:
-    raise ValueError("Missing NVIDIA_API_KEY for nemotron-parse-2.0!")
+    last_error = None
+    for model_name in models_to_try:
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=contents,
+                config=config
+            )
+            return response.text
+        except Exception as err:
+            last_error = err
+            err_msg = str(err).lower()
+            if "404" in err_msg or "not_found" in err_msg or "no longer available" in err_msg:
+                continue
+            elif "429" in err_msg or "resource_exhausted" in err_msg:
+                time.sleep(3)
 
-  client = get_nvidia_client(nvidia_key)
-  extracted_markdown_pages = []
+    try:
+        for m in client.models.list():
+            if "generateContent" in getattr(m, "supported_generation_methods", []) or "flash" in m.name:
+                model_id = m.name.replace("models/", "")
+                try:
+                    response = client.models.generate_content(
+                        model=model_id,
+                        contents=contents,
+                        config=config
+                    )
+                    return response.text
+                except Exception:
+                    continue
+    except Exception:
+        pass
 
-  for page_num, img in enumerate(pdf_page_images):
-    b64_str = pil_to_base64(img)
-
-    messages = [{
-        "role": "user",
-        "content": [
-            {
-                "type": "text",
-                "text": (
-                    "Extract all document text, fields, checkboxes, site ID,"
-                    " technician name, and tabular checksheets accurately"
-                    " into standard Markdown format."
-                ),
-            },
-            {
-                "type": "image_url",
-                "image_url": {"url": f"data:image/jpeg;base64,{b64_str}"},
-            },
-        ],
-    }]
-
-    response = client.chat.completions.create(
-        model="nvidia/nemotron-parse-2.0",
-        messages=messages,
-        temperature=0.0,
-        max_tokens=2048,  # Fixed: Reduced from 4096 to keep under context limit
-    )
-
-    page_md = response.choices[0].message.content
-    extracted_markdown_pages.append(f"--- PAGE {page_num + 1} ---\n{page_md}")
-
-  return "\n\n".join(extracted_markdown_pages)
-
-
-def run_ai_audit_call(
-    provider, prompt, text_content, pil_images=None, is_json=False
-):
-  pil_images = pil_images or []
-
-  if provider == "Google Gemini (Recommended)":
-    gemini_key = st.secrets.get("GEMINI_API_KEY") or os.environ.get(
-        "GEMINI_API_KEY"
-    )
-    if not gemini_key:
-      raise ValueError("Missing GEMINI_API_KEY!")
-
-    client = get_gemini_client(gemini_key)
-    configured_model = (
-        st.secrets.get("GEMINI_MODEL")
-        or os.environ.get("GEMINI_MODEL")
-        or "gemini-2.5-flash"
-    )
-
-    contents_payload = [f"{prompt}\n\nDOCUMENT TEXT / CONTEXT:\n{text_content}"]
-    for img in pil_images:
-      img_bytes = pil_to_bytes(img)
-      contents_payload.append(
-          types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg")
-      )
-
-    gen_config = types.GenerateContentConfig(
-        temperature=0.1,
-        max_output_tokens=2048,  # Safe output token limit
-        response_mime_type="application/json" if is_json else "text/plain",
-    )
-
-    response = client.models.generate_content(
-        model=configured_model, contents=contents_payload, config=gen_config
-    )
-    return response.text
-
-  elif provider == "NVIDIA (DeepSeek V4.1)":
-    nvidia_key = st.secrets.get("NVIDIA_API_KEY") or os.environ.get(
-        "NVIDIA_API_KEY"
-    )
-    if not nvidia_key:
-      raise ValueError("Missing NVIDIA_API_KEY!")
-
-    client = get_nvidia_client(nvidia_key)
-
-    user_content = [
-        {"type": "text", "text": f"{prompt}\n\nDOCUMENT DATA:\n{text_content}"}
-    ]
-
-    if pil_images:
-      stitched_img = stitch_images_to_grid(pil_images)
-      b64_str = pil_to_base64(stitched_img)
-      user_content.append({
-          "type": "image_url",
-          "image_url": {"url": f"data:image/jpeg;base64,{b64_str}"},
-      })
-
-    messages_payload = [{"role": "user", "content": user_content}]
-
-    response = client.chat.completions.create(
-        model="deepseek-ai/deepseek-v4.1-flash",
-        messages=messages_payload,
-        temperature=0.1,
-        max_tokens=2048,  # Fixed: Leaves token space for inputs & stitched images
-    )
-    return response.choices[0].message.content.strip()
-
+    raise last_error
 
 # ---------------------------------------------------------
-# Helper: Supabase Client & File Export
+# Helper: Supabase Client Connection
 # ---------------------------------------------------------
 def get_supabase_client() -> Client:
-  url = st.secrets.get("SUPABASE_URL") or os.environ.get("SUPABASE_URL")
-  key = st.secrets.get("SUPABASE_KEY") or os.environ.get("SUPABASE_KEY")
-  return create_client(url, key) if url and key else None
+    url = st.secrets.get("SUPABASE_URL") or os.environ.get("SUPABASE_URL")
+    key = st.secrets.get("SUPABASE_KEY") or os.environ.get("SUPABASE_KEY")
+    return create_client(url, key) if url and key else None
 
+def save_report_to_supabase(site_id, technician, status, report_text, user_lat, user_lon):
+    try:
+        supabase = get_supabase_client()
+        if not supabase:
+            st.error("❌ Supabase URL or Key missing!")
+            return False
 
-def save_report_to_supabase(
-    site_id, technician, status, report_text, user_lat, user_lon
-):
-  try:
-    supabase = get_supabase_client()
-    if not supabase:
-      return False
+        data = {
+            "site_id": site_id,
+            "technician": technician,
+            "coordinates": f"{user_lat}, {user_lon}" if user_lat else "N/A",
+            "status": status,
+            "report_text": report_text
+        }
+        supabase.table("audit_reports").insert(data).execute()
+        return True
+    except Exception as e:
+        st.error(f"⚠️ Database error: {str(e)}")
+        return False
 
-    data = {
-        "site_id": site_id,
-        "technician": technician,
-        "coordinates": f"{user_lat}, {user_lon}" if user_lat else "N/A",
-        "status": status,
-        "report_text": report_text,
-    }
-    supabase.table("audit_reports").insert(data).execute()
-    return True
-  except Exception as e:
-    st.error(f"⚠️ Database error: {str(e)}")
-    return False
-
-
-def convert_df_to_excel(df, sheet_name="Audit_Reports"):
-  output = io.BytesIO()
-  with pd.ExcelWriter(output, engine="openpyxl") as writer:
-    df.to_excel(writer, index=False, sheet_name=sheet_name)
-  return output.getvalue()
-
+def convert_df_to_excel(df, sheet_name='Audit_Reports'):
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name=sheet_name)
+    return output.getvalue()
 
 # ---------------------------------------------------------
 # 1. Page Config & CSS
 # ---------------------------------------------------------
 st.set_page_config(
-    page_title="Telecom Audit AI Engine",
+    page_title="Telecom Audit AI",
     page_icon="📡",
     layout="centered",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed"
 )
 
-st.markdown(
-    """
-<style>
-.block-container { padding-top: 1.5rem; padding-bottom: 1.5rem; max-width: 950px; }
-.stApp { background-color: #121417; color: #e2e8f0; }
-.header-card {
-    background-color: #1e222b;
-    padding: 12px 16px;
-    border-radius: 8px;
-    margin-bottom: 12px;
-    border: 1px solid #2d3442;
-}
-</style>
-""",
-    unsafe_allow_html=True,
-)
+st.markdown("""
+    <style>
+    .block-container {
+        padding-top: 1.5rem;
+        padding-bottom: 1.5rem;
+        padding-left: 1rem;
+        padding-right: 1rem;
+        max-width: 950px;
+    }
+    .stApp {
+        background-color: #121417;
+        color: #e2e8f0;
+    }
+    .header-card {
+        background-color: #1e222b;
+        padding: 12px 16px;
+        border-radius: 8px;
+        margin-bottom: 12px;
+        border: 1px solid #2d3442;
+    }
+    .stButton>button {
+        background-color: #2563eb;
+        color: white;
+        border-radius: 6px;
+        border: none;
+        padding: 8px 16px;
+        font-weight: 600;
+    }
+    </style>
+""", unsafe_allow_html=True)
 
 # ---------------------------------------------------------
-# 2. Authentication & Sidebar Settings
+# 2. Authentication System
 # ---------------------------------------------------------
 USER_CREDENTIALS = {
     "admin": "telecom2026",
     "mustafa": "audit123",
-    "user": "asiacell123",
+    "user": "asiacell123"
 }
 
 if "authenticated" not in st.session_state:
-  st.session_state["authenticated"] = False
+    st.session_state["authenticated"] = False
 
 if not st.session_state["authenticated"]:
-  st.title("🔒 Telecom Site Audit AI - Login")
-  with st.form("login_form"):
-    username_input = st.text_input("Username").strip()
-    password_input = st.text_input("Password", type="password").strip()
-    if st.form_submit_button("Log In"):
-      if USER_CREDENTIALS.get(username_input) == password_input:
-        st.session_state["authenticated"] = True
-        st.session_state["logged_user"] = username_input
-        st.rerun()
-      else:
-        st.error("Invalid credentials.")
-  st.stop()
-
-st.sidebar.title("⚙️ AI Pipeline Selection")
-ai_provider = st.sidebar.selectbox(
-    "Visual Reasoning Engine",
-    ["Google Gemini (Recommended)", "NVIDIA (DeepSeek V4.1)"],
-)
-
-st.sidebar.info(
-    "📄 PDF Parse Model: **NVIDIA nemotron-parse-2.0** (Active - Single-Page"
-    " Batch Enabled)"
-)
+    st.title("🔒 Telecom Site Audit AI - Login")
+    with st.form("login_form"):
+        username_input = st.text_input("Username").strip()
+        password_input = st.text_input("Password", type="password").strip()
+        if st.form_submit_button("Log In"):
+            if USER_CREDENTIALS.get(username_input) == password_input:
+                st.session_state["authenticated"] = True
+                st.session_state["logged_user"] = username_input
+                st.rerun()
+            else:
+                st.error("Invalid credentials.")
+    st.stop()
 
 # ---------------------------------------------------------
-# 3. KML Dataset Loading
+# 3. KML Loader
 # ---------------------------------------------------------
 KML_EXACT_PATH = os.path.join(BASE_DIR, "data", "sites.kml")
 
-
 @st.cache_data(ttl=300)
 def load_kml_dataset():
-  if os.path.exists(KML_EXACT_PATH):
-    return parse_telecom_kml(KML_EXACT_PATH)
-  return []
-
+    if os.path.exists(KML_EXACT_PATH):
+        return parse_telecom_kml(KML_EXACT_PATH)
+    return []
 
 df_sites = pd.DataFrame(load_kml_dataset())
 
 # ---------------------------------------------------------
-# 4. Interface Header & Navigation Tabs
+# 4. Header & Navigation Tabs
 # ---------------------------------------------------------
-st.markdown(
-    """
-<div class='header-card'>
-    <h3 style='color: #38bdf8; margin:0;'>📡 Telecom Site Audit AI Pipeline</h3>
-    <p style='color: #94a3b8; margin:2px 0 0 0; font-size:12px;'>Dual Engine: Nemotron Parse 2.0 (PDF) + Gemini/DeepSeek (Vision Reasoning)</p>
-</div>
-""",
-    unsafe_allow_html=True,
-)
+st.markdown("""
+    <div class='header-card'>
+        <h3 style='color: #38bdf8; margin:0;'>📡 Telecom Site Audit AI (NTG Tagging)</h3>
+        <p style='color: #94a3b8; margin:2px 0 0 0; font-size:12px;'>R3-BAG-CLS5 Supervisor Engine</p>
+    </div>
+""", unsafe_allow_html=True)
 
-tab_audit, tab_pm, tab_combined = st.tabs([
-    "📸 Field Photo Audit",
-    "📄 PM Checksheet Analyzer (Nemotron)",
-    "📊 Combined PDF + Photo Technical Report",
-])
+tab_audit, tab_pm = st.tabs(["🔍 Field Audit & NTG", "📄 Multi-PM Analyzer"])
 
 # ---------------------------------------------------------
-# TAB 1: Field Audit (Photo Focus)
+# TAB 1: Field Audit
 # ---------------------------------------------------------
 with tab_audit:
-  col_site, col_tech = st.columns(2)
-  with col_site:
-    manual_site_input = (
-        st.text_input("SITE ID", placeholder="BAG0123").strip().upper()
-    )
-  with col_tech:
-    tech_name_input = st.text_input("TECHNICIAN", placeholder="Tech Name").strip()
+    col_site, col_tech = st.columns(2)
+    with col_site:
+        manual_site_input = st.text_input("SITE ID", placeholder="BAG0123").strip().upper()
+    with col_tech:
+        tech_name_input = st.text_input("TECHNICIAN", placeholder="Tech Name").strip()
 
-  loc = get_geolocation()
-  user_lat, user_lon = (
-      (loc["coords"]["latitude"], loc["coords"]["longitude"])
-      if loc and "coords" in loc
-      else (None, None)
-  )
+    loc = get_geolocation()
+    user_lat, user_lon = (loc['coords']['latitude'], loc['coords']['longitude']) if loc and 'coords' in loc else (None, None)
 
-  is_location_valid = False
-  if manual_site_input == "BAG0000":
-    is_location_valid = True
-    st.success("🃏 Joker Test Site Active (BAG0000). GPS validation bypassed.")
-  elif manual_site_input and not df_sites.empty:
-    target_col = next(
-        (
-            c
-            for c in ["site_code", "site_id", "name"]
-            if c in df_sites.columns
-        ),
-        None,
-    )
-    if target_col:
-      matched = df_sites[
-          df_sites[target_col].astype(str).str.strip().str.upper()
-          == manual_site_input
-      ]
-      if not matched.empty:
-        site_lat, site_lon = matched.iloc[0].get("latitude"), matched.iloc[
-            0
-        ].get("longitude")
-        if site_lat and site_lon and user_lat and user_lon:
-          dist_m = int(
-              calculate_distance_km(user_lat, user_lon, site_lat, site_lon)
-              * 1000
-          )
-          if dist_m <= 200:
-            is_location_valid = True
-            st.success(f"✅ GPS Validated ({dist_m}m away).")
-          else:
-            st.error(f"❌ GPS Mismatch: {dist_m}m away. Must be < 200m.")
-        else:
-          st.warning("⚠️ GPS signal needed for validation.")
-      else:
+    is_location_valid = False
+    if manual_site_input == "BAG0000":
         is_location_valid = True
-    else:
-      is_location_valid = True
-  elif manual_site_input:
-    is_location_valid = True
+        st.success("🃏 Joker Test Site Active (BAG0000). GPS validation bypassed.")
+    elif manual_site_input and not df_sites.empty:
+        target_col = next((c for c in ['site_code', 'site_id', 'name'] if c in df_sites.columns), None)
+        if target_col:
+            matched = df_sites[df_sites[target_col].astype(str).str.strip().str.upper() == manual_site_input]
+            if not matched.empty:
+                site_lat, site_lon = matched.iloc[0].get('latitude'), matched.iloc[0].get('longitude')
+                if site_lat and site_lon and user_lat and user_lon:
+                    dist_m = int(calculate_distance_km(user_lat, user_lon, site_lat, site_lon) * 1000)
+                    if dist_m <= 200:
+                        is_location_valid = True
+                        st.success(f"✅ GPS Validated ({dist_m}m away).")
+                    else:
+                        st.error(f"❌ GPS Mismatch: {dist_m}m away. Must be < 200m.")
+                else:
+                    st.warning("⚠️ GPS signal needed for validation.")
+            else:
+                is_location_valid = True
+        else:
+            is_location_valid = True
+    elif manual_site_input:
+        is_location_valid = True
 
-  if "captured_photos" not in st.session_state:
-    st.session_state["captured_photos"] = []
-
-  uploaded_files = []
-  if manual_site_input and is_location_valid:
-    input_mode = st.radio(
-        "Input Source:", ["Camera", "Gallery"], horizontal=True
-    )
-    if input_mode == "Camera":
-      img_file = st.camera_input("Take Picture")
-      if img_file and not any(
-          p.getvalue() == img_file.getvalue()
-          for p in st.session_state["captured_photos"]
-      ):
-        st.session_state["captured_photos"].append(img_file)
-
-      if st.button("🗑️ Clear All"):
+    if "captured_photos" not in st.session_state:
         st.session_state["captured_photos"] = []
-        st.rerun()
 
-      uploaded_files = st.session_state["captured_photos"]
-    else:
-      img_files = st.file_uploader(
-          "Upload photos",
-          type=["jpg", "jpeg", "png"],
-          accept_multiple_files=True,
-      )
-      if img_files:
-        uploaded_files.extend(img_files)
+    uploaded_files = []
+    if manual_site_input and is_location_valid:
+        input_mode = st.radio("Input Source:", ["Camera", "Gallery"], horizontal=True)
+        if input_mode == "Camera":
+            img_file = st.camera_input("Take Picture")
+            if img_file and not any(p.getvalue() == img_file.getvalue() for p in st.session_state["captured_photos"]):
+                st.session_state["captured_photos"].append(img_file)
 
-    if uploaded_files:
-      cols = st.columns(6)
-      for idx, file in enumerate(uploaded_files):
-        with cols[idx % 6]:
-          st.image(file, width=80)
+            if st.button("🗑️ Clear All"):
+                st.session_state["captured_photos"] = []
+                st.rerun()
 
-  if st.button(
-      "📤 Run Field Audit",
-      width="stretch",
-      disabled=(not manual_site_input or not is_location_valid),
-  ):
-    if not uploaded_files:
-      st.warning("Please attach at least one photo.")
-    else:
-      with st.spinner(f"⚡ Analyzing field photos with {ai_provider}..."):
-        try:
-          pil_images = [optimize_image(f) for f in uploaded_files]
+            uploaded_files = st.session_state["captured_photos"]
+        else:
+            img_files = st.file_uploader("Upload photos", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
+            if img_files:
+                uploaded_files.extend(img_files)
 
-          SYSTEM_PROMPT = (
-              "You are a telecom audit engineer inspecting physical equipment,"
-              " cabinet status, and NTG Asset Tagging.\n"
-              f"Analyzing Site ID: {manual_site_input} | Technician:"
-              f" {tech_name_input or 'Unassigned'}\n\n"
-              "MANDATORY OUTPUT FORMAT:\n"
-              "### 1. EQUIPMENT QUANTITY COUNT & AUDIT\n"
-              "| Equipment / Asset Description | Identified Model / Brand |"
-              " Quantities Detected | Photo Status |\n"
-              "| :--- | :--- | :--- | :--- |\n\n"
-              "### 2. NTG ASSET TAGGING VERIFICATION\n"
-              "- Asset barcode visibility, port labeling, cable dressing.\n\n"
-              "### 3. FINAL VERDICT & DEFECTS\n"
-              "- **Final Verdict:** [PASS / PASS WITH CONCERNS / FAIL]\n"
-              "- **Identified Defects:** Detail physical issues.\n"
-              "- **Corrective Actions:** Required steps."
-          )
+        if uploaded_files:
+            cols = st.columns(6)
+            for idx, file in enumerate(uploaded_files):
+                with cols[idx % 6]:
+                    st.image(file, width=80)
 
-          report_text = run_ai_audit_call(
-              provider=ai_provider,
-              prompt=SYSTEM_PROMPT,
-              text_content="",
-              pil_images=pil_images,
-              is_json=False,
-          )
+    if st.button("📤 Run Audit & Submit", use_container_width=True, disabled=(not manual_site_input or not is_location_valid)):
+        if not uploaded_files:
+            st.warning("Please attach at least one photo.")
+        else:
+            gemini_key = st.secrets.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
+            if not gemini_key:
+                st.error("Missing GEMINI_API_KEY!")
+            else:
+                with st.spinner("⚡ Processing Audit..."):
+                    try:
+                        client = genai.Client(api_key=gemini_key)
+                        pil_images = [optimize_image(f) for f in uploaded_files]
 
-          if report_text:
-            st.subheader("📋 Field Audit Report")
-            st.markdown(report_text)
+                        SYSTEM_PROMPT = """
+You are a telecom audit engineer inspecting physical equipment, mandatory site assets, photo quality, and NTG Asset Tagging.
 
-            status_verdict = (
-                "FAIL"
-                if "FAIL" in report_text.upper()
-                else (
-                    "PASS WITH CONCERNS"
-                    if "CONCERNS" in report_text.upper()
-                    else "PASS"
-                )
-            )
-            save_report_to_supabase(
-                manual_site_input,
-                tech_name_input or "Unassigned",
-                status_verdict,
-                report_text,
-                user_lat,
-                user_lon,
-            )
+MANDATORY DIRECTIVE: Failure to adhere to these exact standards will result in immediate rejection of the site acceptance report and withholding of PM sign-off.
 
-        except Exception as e:
-          st.error(f"Audit processing failed: {str(e)}")
+FIELD QUALITY & AUDIT COMPLIANCE DIRECTIVES:
+1. TOWER ELEVATION & PHOTO COMPLIANCE:
+   - Mandatory Tower Climbing: Technicians MUST climb the tower to take close-range, high-resolution photos of all elevated assets (Antennas, RRUs, BOA, Feeders, Jumpers, Mounting Hardware). Ground-level zoomed photos are strictly prohibited.
+   - Exact Slot Allocation: Every image must be uploaded directly into its designated report template slot. Mislabeled or misplaced images will automatically trigger an audit rejection.
+   - Full Access Inspection: Cabinets, ATS units, and power compartment doors must be fully opened and clearly photographed during the audit process.
+
+2. CABLE DRESSING & CONTAINMENT INTEGRITY:
+   - Internal Cabinet Dressing: All wiring inside outdoor cabinets, commercial power boxes, and ATS units must be neatly dressed, bundled, and routed without cross-overs.
+   - Trays & Covers: Cables must run entirely inside designated cable trays (no cables routed outside). All metallic and PVC trunking covers must be correctly aligned and firmly secured.
+   - Feeder Clamping: Tower feeders must be neatly aligned, clamped at standard operational intervals, and properly dressed along the tower down through the entry bridge.
+   - Gas Piping Protection: Gas piping must never be left exposed or unsupported. Route and secure all gas piping inside dedicated protective trays.
+
+3. SITE HOUSEKEEPING & FIRE SAFETY:
+   - Zero Vegetation Buffer: Clear all dry grass, weeds, and combustible debris within a 3-meter radius surrounding the generator, fuel tank, equipment cabinets, and fence line.
+   - Complete Cable Decommissioning: Decommissioned/dead cables must be fully traced, disconnected, and removed from the site. Cutting and abandoning cable segments on-site is strictly forbidden.
+   - Complete Scrap Clearance: Remove all packaging, leftover installation materials, replaced parts, and trash from the site compound prior to departure.
+
+4. MANDATORY SITE EQUIPMENT & VERDICT:
+   - Verify presence and visual coverage of Diesel Generator (DG), Power Cabinet/Rectifiers, Battery Banks, Main Antenna/Tower, and Microwave.
+   - If key mandatory photos (e.g., DG, Rectifiers) are missing, blurry, or taken from a bad angle, flag them under missing/unclear photos and set Verdict to "PASS WITH CONCERNS" or "FAIL".
+
+MANDATORY OUTPUT FORMAT:
+### 1. EQUIPMENT QUANTITY COUNT & AUDIT
+| Equipment / Asset Description | Identified Model / Brand | Quantities Detected | Photo Status (Clear / Blurry / Missing) |
+| :--- | :--- | :--- | :--- |
+
+### 2. MISSING OR UNCLEAR EQUIPMENT PHOTOS
+* **Unclear / Poor Quality Photos:** List any equipment photos that are blurry, taken from a bad angle/ground-level zoom, or dark.
+* **Missing Mandatory Photos:** Explicitly state if photos for Diesel Generator (DG), Rectifiers, Batteries, or Cables are missing or misplaced in wrong slots.
+
+### 3. NTG ASSET TAGGING & BARCODE VERIFICATION
+* **Equipment Identifiers:** Describe NTG tags and asset labels visible in photos.
+* **Cable & Port Labels:** Describe port labels/tags.
+
+### 4. FINAL VERDICT & DEFECTS
+* **Final Verdict:** [PASS / PASS WITH CONCERNS / FAIL]
+* **Identified Defects:** Detail all violations regarding vegetation, cable dressing/trays, tower photo distance, open doors, abandoned cables, or trash.
+* **Corrective Actions:** Specific remediation steps required from technician.
+"""
+
+                        report_text = generate_gemini_content_robust(
+                            client=client,
+                            contents=[f"Site ID: {manual_site_input}\nTechnician: {tech_name_input or 'Unassigned'}", *pil_images],
+                            config=types.GenerateContentConfig(system_instruction=SYSTEM_PROMPT, temperature=0.0)
+                        )
+
+                        if report_text:
+                            st.subheader("📋 Audit Report")
+                            st.markdown(report_text)
+                            
+                            status_verdict = "FAIL" if "FAIL" in report_text.upper() else ("PASS WITH CONCERNS" if "CONCERNS" in report_text.upper() else "PASS")
+                            if save_report_to_supabase(manual_site_input, tech_name_input or 'Unassigned', status_verdict, report_text, user_lat, user_lon):
+                                st.success("✅ Audit logged successfully!")
+                                st.session_state["captured_photos"] = []
+                    except Exception as e:
+                        st.error(f"Audit processing failed: {str(e)}")
 
 # ---------------------------------------------------------
-# TAB 2: Multi-PM Analyzer (Nemotron Parse Engine)
+# TAB 2: Multi-PM Analyzer (Batch PDF Upload & Processing)
 # ---------------------------------------------------------
 with tab_pm:
-  st.subheader(
-      "📄 Multi-PM Checksheet Analyzer (Powered by Nemotron Parse 2.0)"
-  )
+    st.subheader("📄 Multi-PM Checksheet Analyzer")
+    
+    uploaded_pdfs = st.file_uploader(
+        "Upload Multiple PM PDF Files",
+        type=["pdf"],
+        accept_multiple_files=True,
+        help="Upload one or multiple PM checksheets simultaneously."
+    )
 
-  uploaded_pdfs = st.file_uploader(
-      "Upload PM Checksheet PDFs",
-      type=["pdf"],
-      accept_multiple_files=True,
-      key="pm_pdf_uploader",
-  )
+    if uploaded_pdfs:
+        st.info(f"📂 **{len(uploaded_pdfs)}** PDF file(s) loaded.")
 
-  if uploaded_pdfs:
-    st.info(f"📂 **{len(uploaded_pdfs)}** PDF file(s) ready for parsing.")
+        if st.button("🚀 Process All PM PDFs", use_container_width=True):
+            gemini_key = st.secrets.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
+            if not gemini_key:
+                st.error("Missing GEMINI_API_KEY!")
+            else:
+                client = genai.Client(api_key=gemini_key)
+                all_site_data = []
 
-    if st.button("🚀 Parse PM PDFs with Nemotron", width="stretch"):
-      all_site_data = []
-      progress_bar = st.progress(0)
-      status_text = st.empty()
+                BATCH_SYSTEM_PROMPT = """
+You are a senior telecom audit supervisor analyzing PM checksheets and attached site photos.
+Examine ALL provided text, checklist items, and image pages inside the PDF carefully to ensure full compliance with standard telecom directives and expert field observations.
 
-      for idx, pdf_file in enumerate(uploaded_pdfs):
-        status_text.text(
-            f"⚙️ Running Nemotron Parse 2.0 ({idx+1}/{len(uploaded_pdfs)}):"
-            f" {pdf_file.name}"
-        )
+Mandatory Directive: Failure to adhere to these exact standards will result in immediate rejection of the site acceptance report and withholding of PM sign-off.
 
-        _, resized_page_images = process_and_resize_pdf(pdf_file)
+STANDARDIZED OPERATIONAL DIRECTIVES:
+1. Tower Elevation & Photo Compliance:
+   - Mandatory Tower Climbing: Technicians MUST climb the tower to take close-range, high-resolution photos of all elevated assets (Antennas, RRUs, BOA, Feeders, Jumpers, Mounting Hardware). Ground-level zoomed photos are strictly prohibited.
+   - Exact Slot Allocation: Every image must be uploaded directly into its designated report template slot. Mislabeled or misplaced images will automatically trigger an audit rejection.
+   - Full Access Inspection: Cabinets, ATS units, and power compartment doors must be fully opened and clearly photographed during the audit process.
 
-        try:
-          # Step 1: High-precision OCR page-by-page via Nemotron Parse 2.0
-          parsed_markdown = run_nemotron_pdf_parser(resized_page_images)
+2. Cable Dressing & Containment Integrity:
+   - Internal Cabinet Dressing: All wiring inside outdoor cabinets, commercial power boxes, and ATS units must be neatly dressed, bundled, and routed without cross-overs.
+   - Trays & Covers: Cables must run entirely inside designated cable trays (no cables routed outside). All metallic and PVC trunking covers must be correctly aligned and firmly secured.
+   - Feeder Clamping: Tower feeders must be neatly aligned, clamped at standard operational intervals, and properly dressed along the tower down through the entry bridge.
+   - Gas Piping Protection: Gas piping must never be left exposed or unsupported. Route and secure all gas piping inside dedicated protective trays.
 
-          # Step 2: Convert parsed Markdown into structured JSON format
-          JSON_EXTRACT_PROMPT = """You are a JSON formatting assistant. Read the provided document text and convert it strictly into JSON format:
+3. Site Housekeeping & Fire Safety:
+   - Zero Vegetation Buffer: Clear all dry grass, weeds, and combustible debris within a 3-meter radius surrounding the generator, fuel tank, equipment cabinets, and fence line.
+   - Complete Cable Decommissioning: Decommissioned/dead cables must be fully traced, disconnected, and removed from the site. Cutting and abandoning cable segments on-site is strictly forbidden.
+   - Complete Scrap Clearance: Remove all packaging, leftover installation materials, replaced parts, and trash from the site compound prior to departure.
+
+4. DIESEL GENERATOR (DG) AUDIT RULES:
+   - Mandatory DG photos: (a) Overall DG unit, (b) DG LED Display Screen showing running hours, (c) Numerical running hours recorded.
+   - If missing: Flag "Site without DG / DG evidence missing - Mandatory DG photo, LED screen image, and running hours required".
+
+EXPERT FIELD OBSERVATION RULES (Match detected non-conformities against these exact observation notes when applicable):
+- "Dry grass near the generator."
+- "Gas piping without cable trays"
+- "Cutting abandoned cables at the site"
+- "Disorganized cables in commercial power boxes and cabinets."
+- "PVC tray inside the cabinet without a cover."
+- "Dry grass near the generator." / "Disorganized cables in commercial power boxes"
+- "No issue"
+- "The tray cover is not closed properly." / "Cables are disorganized in the commercial power box & the cabinet." / "Gas piping without cable trays" / "The PVC tray inside the ATS has not been covered." / "The images of the items attached to the tower are unclear because the technician did not climb up to photograph them at close range."
+- "Dry grass near the generator & cabinet." / "Disorganized cables in the commercial power box & cabinet" / "Cables routed outside the tray." / "The images of the items attached to the tower are unclear because the technician did not climb up to photograph them at close range."
+- "The tray cover is not closed properly." / "The images of the items attached to the tower are unclear because the technician did not climb up to photograph them at close range." / "Disorganized cables in the cabinet."
+- "The image does not represent what is required." / "The images of the items attached to the tower are unclear because the technician did not climb up to photograph them at close range." / "The tray cover is not closed properly." / "Cables are disorganized in the commercial power box & the cabinet."
+- "Don’t remove the extra materials." / "Cables are disorganized in the cabinet."
+- "The tray cover is not closed properly." / "The images of the items attached to the tower are unclear because the technician did not climb up to photograph them at close range."
+- "The tray cover is not closed properly." / "Disorganized Feeder cables on the tower." / "Cables are disorganized in the commercial power boxes and cabinets." / "The images of the items attached to the tower are unclear because the technician did not climb up to photograph them up close."
+- "The images of the items attached to the tower are unclear because the technician did not climb up to photograph them up close." / "Cables are disorganized in the commercial power boxes and cabinets." / "The cabin doors and the power compartment are not open."
+- "The tray cover is not closed properly." / "Cables are disorganized in the commercial power box"
+- "The tray cover is not closed properly." / "The images are not in their correct positions." / "Cables are outside the tray." / "Cutting abandoned cables at the site." / "Cables are disorganized in the commercial power boxes and cabinets." / "The images of the items attached to the tower are unclear because the technician did not climb up to photograph them up close."
+- "The tray cover is not closed properly." / "The images are not in their correct places." / "Dry grass near the generator & full tank." / "The cables inside the cabinet are unorganized." / "The images of the items attached to the tower are unclear because the technician did not climb up to photograph them up close."
+
+Return strictly concise, valid JSON matching this structure:
 {
-  "site_id": "Extracted Site ID",
+  "site_id": "Extracted Site ID (e.g., ANB3872)",
   "vendor_technician": "Technician Name",
   "pm_date": "YYYY-MM-DD",
   "verdict": "APPROVED" | "APPROVED WITH CONCERNS" | "REJECTED",
-  "missing_equipment_photos": ["Short note"],
-  "critical_remarks": ["Short remark"],
-  "supervisor_focus_notes": ["Short action"]
-}"""
+  "missing_equipment_photos": ["List missing or unclear photos e.g. Tower Close-up, DG LED Screen, Open Cabinet Doors"],
+  "critical_remarks": ["Detailed defect statements matching standard observation rules"],
+  "supervisor_focus_notes": ["Specific corrective actions required from technician to meet mandatory directives"]
+}
+"""
 
-          json_raw = run_ai_audit_call(
-              provider=ai_provider,
-              prompt=JSON_EXTRACT_PROMPT,
-              text_content=parsed_markdown,
-              pil_images=[],
-              is_json=True,
-          )
+                progress_bar = st.progress(0)
+                status_text = st.empty()
 
-          parsed_json = parse_model_json(json_raw)
-          parsed_json["filename"] = pdf_file.name
-          all_site_data.append(parsed_json)
+                for idx, pdf_file in enumerate(uploaded_pdfs):
+                    status_text.text(f"⚙️ Processing ({idx+1}/{len(uploaded_pdfs)}): {pdf_file.name}")
+                    
+                    text_content, resized_page_images = process_and_resize_pdf(pdf_file)
+                    
+                    payload = [f"FILENAME: {pdf_file.name}\nEXTRACTED TEXT:\n{text_content}"]
+                    if resized_page_images:
+                        payload.extend(resized_page_images[:4])
 
-        except Exception as e:
-          all_site_data.append({
-              "filename": pdf_file.name,
-              "site_id": "PARSE_ERR",
-              "vendor_technician": "N/A",
-              "pm_date": "N/A",
-              "verdict": "REJECTED",
-              "missing_equipment_photos": ["Parse Failure"],
-              "critical_remarks": [f"Error: {str(e)}"],
-              "supervisor_focus_notes": ["Check PDF formatting"],
-          })
+                    gen_config = types.GenerateContentConfig(
+                        system_instruction=BATCH_SYSTEM_PROMPT,
+                        temperature=0.0,
+                        max_output_tokens=4096,
+                        response_mime_type="application/json"
+                    )
 
-        progress_bar.progress((idx + 1) / len(uploaded_pdfs))
+                    try:
+                        raw_response = generate_gemini_content_robust(
+                            client=client,
+                            contents=payload,
+                            config=gen_config
+                        )
+                        
+                        parsed = parse_gemini_json(raw_response)
+                        parsed["filename"] = pdf_file.name
+                        all_site_data.append(parsed)
+                        
+                    except Exception as e:
+                        all_site_data.append({
+                            "filename": pdf_file.name,
+                            "site_id": "ERROR",
+                            "vendor_technician": "N/A",
+                            "pm_date": "N/A",
+                            "verdict": "REJECTED",
+                            "missing_equipment_photos": ["Error parsing report"],
+                            "critical_remarks": [f"Processing error: {str(e)}"],
+                            "supervisor_focus_notes": ["Verify document format or JSON truncation"]
+                        })
 
-      status_text.success("✅ Nemotron PDF Parsing completed!")
-      st.session_state["pm_analysis_results"] = all_site_data
+                    progress_bar.progress((idx + 1) / len(uploaded_pdfs))
 
-  if (
-      "pm_analysis_results" in st.session_state
-      and st.session_state["pm_analysis_results"]
-  ):
-    results = st.session_state["pm_analysis_results"]
+                status_text.success("✅ All PM files processed successfully!")
+                st.session_state["pm_analysis_results"] = all_site_data
 
-    summary_rows = [
-        {
+    if "pm_analysis_results" in st.session_state and st.session_state["pm_analysis_results"]:
+        results = st.session_state["pm_analysis_results"]
+        st.markdown("### 📋 Multi-PM Audit Summary")
+        
+        summary_rows = [{
             "Site ID": r.get("site_id", "N/A"),
             "Technician": r.get("vendor_technician", "N/A"),
             "Date": r.get("pm_date", "N/A"),
             "Verdict": r.get("verdict", "N/A"),
-            "Critical Remarks": (
-                " | ".join(r.get("critical_remarks", []))
-                if isinstance(r.get("critical_remarks"), list)
-                else str(r.get("critical_remarks", ""))
-            ),
-            "Filename": r.get("filename", ""),
-        }
-        for r in results
-    ]
+            "Missing/Unclear Photos": " | ".join(r.get("missing_equipment_photos", [])) if isinstance(r.get("missing_equipment_photos"), list) else str(r.get("missing_equipment_photos", "")),
+            "Critical Remarks": " | ".join(r.get("critical_remarks", [])) if isinstance(r.get("critical_remarks"), list) else str(r.get("critical_remarks", "")),
+            "Focus Actions": " | ".join(r.get("supervisor_focus_notes", [])) if isinstance(r.get("supervisor_focus_notes"), list) else str(r.get("supervisor_focus_notes", "")),
+            "Filename": r.get("filename", "")
+        } for r in results]
+        
+        df_summary = pd.DataFrame(summary_rows)
+        st.dataframe(df_summary, use_container_width=True)
 
-    df_summary = pd.DataFrame(summary_rows)
-    st.dataframe(df_summary, width="stretch")
-
-    st.download_button(
-        label="📥 Download Summary (.xlsx)",
-        data=convert_df_to_excel(df_summary, sheet_name="PM_Summary"),
-        file_name="Multi_PM_Summary.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
-
-# ---------------------------------------------------------
-# TAB 3: Combined Technical Report (PDFs + Field Photos)
-# ---------------------------------------------------------
-with tab_combined:
-  st.subheader("📊 Combined Multi-Modal Technical Report")
-  st.caption(
-      "Cross-references PDF checksheet data against uploaded field site photos."
-  )
-
-  col_pdf_in, col_img_in = st.columns(2)
-  with col_pdf_in:
-    comb_pdf = st.file_uploader("Upload Site PM PDF", type=["pdf"], key="comb_pdf")
-  with col_img_in:
-    comb_photos = st.file_uploader(
-        "Upload Physical Site Photos",
-        type=["jpg", "jpeg", "png"],
-        accept_multiple_files=True,
-        key="comb_photos",
-    )
-
-  if st.button(
-      "⚡ Generate Combined Technical Report",
-      width="stretch",
-      disabled=(not comb_pdf or not comb_photos),
-  ):
-    with st.spinner(
-        "Processing PDF via Nemotron & Analyzing Photos via Vision Engine..."
-    ):
-      try:
-        # 1. Parse PDF page-by-page with Nemotron Parse 2.0
-        _, pdf_imgs = process_and_resize_pdf(comb_pdf)
-        extracted_pdf_text = run_nemotron_pdf_parser(pdf_imgs)
-
-        # 2. Prepare field photos
-        pil_photos = [optimize_image(p) for p in comb_photos]
-
-        # 3. Formulate Cross-Verification Prompt
-        COMBINED_PROMPT = """You are a Lead Telecom Operations Supervisor compiling a comprehensive Technical Audit Report.
-
-Cross-reference the EXTRACTED PDF CHECKSHEET TEXT against the ATTACHED FIELD SITE PHOTOS.
-
-Produce a detailed report with the following structure:
-1. EXECUTIVE SUMMARY & SITE METADATA (Site ID, Vendor Technician, PM Date)
-2. CHECKSHEET DATA AUDIT (Summary of claims made in the PDF document)
-3. PHYSICAL VISUAL AUDIT (Findings from physical photos: Cabinet status, Cable dressing, Rectifiers, Batteries, NTG Tags)
-4. CROSS-VERIFICATION & DISCREPANCY ANALYSIS (Highlight differences between what technician claimed on PDF vs actual physical evidence in photos)
-5. FINAL SUPERVISOR VERDICT & ACTION PLAN (PASS / PASS WITH CONCERNS / REJECTED + Corrective actions)"""
-
-        combined_report = run_ai_audit_call(
-            provider=ai_provider,
-            prompt=COMBINED_PROMPT,
-            text_content=extracted_pdf_text,
-            pil_images=pil_photos,
-            is_json=False,
+        st.download_button(
+            label="📥 Download Multi-PM Summary (.xlsx)",
+            data=convert_df_to_excel(df_summary, sheet_name='PM_Summary'),
+            file_name="Multi_PM_Summary.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
-
-        st.markdown("---")
-        st.markdown(combined_report)
-
-      except Exception as e:
-        st.error(f"Failed to generate combined report: {str(e)}")
